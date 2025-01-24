@@ -1,10 +1,9 @@
 use std::ops::Range;
 use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
 
 use common::BitSet;
 use smallvec::smallvec;
+use threadpool::ThreadPool;
 
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
@@ -61,8 +60,6 @@ pub struct IndexWriter<D: Document = TantivyDocument> {
     // The memory budget per thread, after which a commit is triggered.
     memory_budget_in_bytes_per_thread: usize,
 
-    workers_join_handle: Vec<JoinHandle<crate::Result<()>>>,
-
     index_writer_status: IndexWriterStatus<D>,
     operation_sender: AddBatchSender<D>,
 
@@ -77,6 +74,9 @@ pub struct IndexWriter<D: Document = TantivyDocument> {
 
     stamper: Stamper,
     committed_opstamp: Opstamp,
+
+    pool: ThreadPool,
+    done_receivers: Vec<crossbeam_channel::Receiver<crate::Result<()>>>,
 }
 
 fn compute_deleted_bitset(
@@ -310,7 +310,6 @@ impl<D: Document> IndexWriter<D> {
 
             segment_updater,
 
-            workers_join_handle: vec![],
             num_threads,
 
             num_merge_threads,
@@ -321,6 +320,8 @@ impl<D: Document> IndexWriter<D> {
             stamper,
 
             worker_id: 0,
+            pool: ThreadPool::new(num_threads),
+            done_receivers: Vec::with_capacity(num_threads),
         };
         index_writer.start_workers()?;
         Ok(index_writer)
@@ -343,11 +344,10 @@ impl<D: Document> IndexWriter<D> {
         // dropping the last reference to the segment_updater.
         self.drop_sender();
 
-        let former_workers_handles = std::mem::take(&mut self.workers_join_handle);
-        for join_handle in former_workers_handles {
-            join_handle
-                .join()
-                .map_err(|_| error_in_index_worker_thread("Worker thread panicked."))?
+        let done_receivers = std::mem::take(&mut self.done_receivers);
+        for receiver in done_receivers {
+            receiver
+                .recv()
                 .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?;
         }
 
@@ -405,46 +405,49 @@ impl<D: Document> IndexWriter<D> {
         let segment_updater = self.segment_updater.clone();
 
         let mut delete_cursor = self.delete_queue.cursor();
-
+        let (done_notifer, done_receiver) =
+            crossbeam_channel::bounded::<crate::Result<()>>(self.num_threads);
         let mem_budget = self.memory_budget_in_bytes_per_thread;
         let index = self.index.clone();
-        let join_handle: JoinHandle<crate::Result<()>> = thread::Builder::new()
-            .name(format!("thrd-tantivy-index{}", self.worker_id))
-            .spawn(move || {
-                loop {
-                    let mut document_iterator = document_receiver_clone
-                        .clone()
-                        .into_iter()
-                        .filter(|batch| !batch.is_empty())
-                        .peekable();
+        self.pool.execute(move || {
+            loop {
+                let mut document_iterator = document_receiver_clone
+                    .clone()
+                    .into_iter()
+                    .filter(|batch| !batch.is_empty())
+                    .peekable();
 
-                    // The peeking here is to avoid creating a new segment's files
-                    // if no document are available.
-                    //
-                    // This is a valid guarantee as the peeked document now belongs to
-                    // our local iterator.
-                    if let Some(batch) = document_iterator.peek() {
-                        assert!(!batch.is_empty());
-                        delete_cursor.skip_to(batch[0].opstamp);
-                    } else {
-                        // No more documents.
-                        // It happens when there is a commit, or if the `IndexWriter`
-                        // was dropped.
-                        index_writer_bomb.defuse();
-                        return Ok(());
-                    }
-
-                    index_documents(
-                        mem_budget,
-                        index.new_segment(),
-                        &mut document_iterator,
-                        &segment_updater,
-                        delete_cursor.clone(),
-                    )?;
+                // The peeking here is to avoid creating a new segment's files
+                // if no document are available.
+                //
+                // This is a valid guarantee as the peeked document now belongs to
+                // our local iterator.
+                if let Some(batch) = document_iterator.peek() {
+                    assert!(!batch.is_empty());
+                    delete_cursor.skip_to(batch[0].opstamp);
+                } else {
+                    // No more documents.
+                    // It happens when there is a commit, or if the `IndexWriter`
+                    // was dropped.
+                    index_writer_bomb.defuse();
+                    let e = done_notifer.send(Ok(()));
+                    return;
                 }
-            })?;
+
+                if let Err(e) = index_documents(
+                    mem_budget,
+                    index.new_segment(),
+                    &mut document_iterator,
+                    &segment_updater,
+                    delete_cursor.clone(),
+                ) {
+                    done_notifer.send(Err(e));
+                    return;
+                }
+            }
+        });
         self.worker_id += 1;
-        self.workers_join_handle.push(join_handle);
+        self.done_receivers.push(done_receiver);
         Ok(())
     }
 
@@ -625,13 +628,12 @@ impl<D: Document> IndexWriter<D> {
         // and recreate a new one.
         self.recreate_document_channel();
 
-        let former_workers_join_handle = std::mem::take(&mut self.workers_join_handle);
+        let done_receivers = std::mem::take(&mut self.done_receivers);
 
-        for worker_handle in former_workers_join_handle {
-            let indexing_worker_result = worker_handle
-                .join()
+        for worker_handle in done_receivers {
+            worker_handle
+                .recv()
                 .map_err(|e| TantivyError::ErrorInThread(format!("{e:?}")))?;
-            indexing_worker_result?;
             self.add_indexing_worker()?;
         }
 
@@ -801,8 +803,8 @@ impl<D: Document> Drop for IndexWriter<D> {
     fn drop(&mut self) {
         self.segment_updater.kill();
         self.drop_sender();
-        for work in self.workers_join_handle.drain(..) {
-            let _ = work.join();
+        for receiver in self.done_receivers.drain(..) {
+            let _ = receiver.recv();
         }
     }
 }
