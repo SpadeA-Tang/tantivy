@@ -430,7 +430,7 @@ impl<D: Document> IndexWriter<D> {
                     // It happens when there is a commit, or if the `IndexWriter`
                     // was dropped.
                     index_writer_bomb.defuse();
-                    let e = done_notifer.send(Ok(()));
+                    let _ = done_notifer.send(Ok(()));
                     return;
                 }
 
@@ -631,7 +631,7 @@ impl<D: Document> IndexWriter<D> {
         let done_receivers = std::mem::take(&mut self.done_receivers);
 
         for worker_handle in done_receivers {
-            worker_handle
+            let _ = worker_handle
                 .recv()
                 .map_err(|e| TantivyError::ErrorInThread(format!("{e:?}")))?;
             self.add_indexing_worker()?;
