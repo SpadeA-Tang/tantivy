@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use common::BitSet;
+use futures::{future, Stream, StreamExt};
 use smallvec::smallvec;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot::{self, Receiver};
@@ -167,15 +168,18 @@ pub(crate) fn advance_deletes(
     Ok(())
 }
 
-fn index_documents<D: Document>(
+async fn index_documents<D: Document, S>(
     memory_budget: usize,
     segment: Segment,
-    grouped_document_iterator: &mut dyn Iterator<Item = AddBatch<D>>,
+    grouped_document_iterator: &mut S,
     segment_updater: &SegmentUpdater,
     mut delete_cursor: DeleteCursor,
-) -> crate::Result<()> {
+) -> crate::Result<()>
+where
+    S: Stream<Item = AddBatch<D>> + Unpin,
+{
     let mut segment_writer = SegmentWriter::for_segment(memory_budget, segment.clone())?;
-    for document_group in grouped_document_iterator {
+    while let Some(document_group) = grouped_document_iterator.next().await {
         for doc in document_group {
             segment_writer.add_document(doc)?;
         }
@@ -286,7 +290,7 @@ impl<D: Document> IndexWriter<D> {
             return Err(TantivyError::InvalidArgument(err_msg));
         }
         let (document_sender, document_receiver) =
-            crossbeam_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
+            async_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
 
         let delete_queue = DeleteQueue::new();
 
@@ -334,7 +338,7 @@ impl<D: Document> IndexWriter<D> {
     }
 
     fn drop_sender(&mut self) {
-        let (sender, _receiver) = crossbeam_channel::bounded(1);
+        let (sender, _receiver) = async_channel::bounded(1);
         self.operation_sender = sender;
     }
 
@@ -417,20 +421,19 @@ impl<D: Document> IndexWriter<D> {
         let index = self.index.clone();
         self.runtime.spawn(async move {
             loop {
-                let mut document_iterator = document_receiver_clone
-                    .clone()
-                    .into_iter()
-                    .filter(|batch| !batch.is_empty())
-                    .peekable();
+                // let mut document_iterator = document_receiver_clone
+                //     .clone()
+                //     .into_iter()
+                //     .filter(|batch| !batch.is_empty())
+                //     .peekable();
+                let mut filtered_receiver =
+                    std::pin::pin!(Box::pin(document_receiver_clone.clone())
+                        .filter(|batch| future::ready(!batch.is_empty()))
+                        .peekable());
 
-                // The peeking here is to avoid creating a new segment's files
-                // if no document are available.
-                //
-                // This is a valid guarantee as the peeked document now belongs to
-                // our local iterator.
-                if let Some(batch) = document_iterator.peek() {
-                    assert!(!batch.is_empty());
-                    delete_cursor.skip_to(batch[0].opstamp);
+                if let Some(first_batch) = filtered_receiver.as_mut().peek().await {
+                    assert!(!first_batch.is_empty());
+                    delete_cursor.skip_to(first_batch[0].opstamp);
                 } else {
                     // No more documents.
                     // It happens when there is a commit, or if the `IndexWriter`
@@ -438,15 +441,34 @@ impl<D: Document> IndexWriter<D> {
                     index_writer_bomb.defuse();
                     let _ = done_notifer.send(Ok(()));
                     return;
-                }
+                };
+
+                // // The peeking here is to avoid creating a new segment's files
+                // // if no document are available.
+                // //
+                // // This is a valid guarantee as the peeked document now belongs to
+                // // our local iterator.
+                // if let Some(batch) = document_iterator.peek() {
+                //     assert!(!batch.is_empty());
+                //     delete_cursor.skip_to(batch[0].opstamp);
+                // } else {
+                //     // No more documents.
+                //     // It happens when there is a commit, or if the `IndexWriter`
+                //     // was dropped.
+                //     index_writer_bomb.defuse();
+                //     let _ = done_notifer.send(Ok(()));
+                //     return;
+                // }
 
                 if let Err(e) = index_documents(
                     mem_budget,
                     index.new_segment(),
-                    &mut document_iterator,
+                    &mut filtered_receiver,
                     &segment_updater,
                     delete_cursor.clone(),
-                ) {
+                )
+                .await
+                {
                     let _ = done_notifer.send(Err(e));
                     return;
                 }
@@ -544,7 +566,7 @@ impl<D: Document> IndexWriter<D> {
     /// Returns the former segment_ready channel.
     fn recreate_document_channel(&mut self) {
         let (document_sender, document_receiver) =
-            crossbeam_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
+            async_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
         self.operation_sender = document_sender;
         self.index_writer_status = IndexWriterStatus::from(document_receiver);
     }
@@ -590,7 +612,8 @@ impl<D: Document> IndexWriter<D> {
         // This will reach an end as the only document_sender
         // was dropped with the index_writer.
         if let Ok(document_receiver) = document_receiver_res {
-            for _ in document_receiver {}
+            self.runtime
+                .block_on(async { while document_receiver.recv().await.is_ok() {} });
         }
 
         Ok(self.committed_opstamp)
@@ -636,7 +659,8 @@ impl<D: Document> IndexWriter<D> {
 
         let mut done_receivers = std::mem::take(&mut self.done_receivers);
         for receiver in done_receivers.drain(..) {
-            let indexing_worker_result = self.runtime
+            let indexing_worker_result = self
+                .runtime
                 .block_on(async move { receiver.await })
                 .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?;
             indexing_worker_result?;
@@ -797,11 +821,18 @@ impl<D: Document> IndexWriter<D> {
     }
 
     fn send_add_documents_batch(&self, add_ops: AddBatch<D>) -> crate::Result<()> {
-        if self.index_writer_status.is_alive() && self.operation_sender.send(add_ops).is_ok() {
-            Ok(())
-        } else {
-            Err(error_in_index_worker_thread("An index writer was killed."))
+        if self.index_writer_status.is_alive() {
+            let sender = self.operation_sender.clone();
+            if self
+                .runtime
+                .block_on(async { sender.send(add_ops).await })
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
+
+        Err(error_in_index_worker_thread("An index writer was killed."))
     }
 }
 
