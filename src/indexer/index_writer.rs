@@ -4,6 +4,7 @@ use std::sync::Arc;
 use common::BitSet;
 use smallvec::smallvec;
 use tokio::runtime::{Builder, Runtime};
+use tokio::sync::oneshot::{self, Receiver};
 
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
@@ -76,7 +77,7 @@ pub struct IndexWriter<D: Document = TantivyDocument> {
     committed_opstamp: Opstamp,
 
     runtime: Runtime,
-    done_receivers: Vec<crossbeam_channel::Receiver<crate::Result<()>>>,
+    done_receivers: Vec<Receiver<crate::Result<()>>>,
 }
 
 fn compute_deleted_bitset(
@@ -349,11 +350,11 @@ impl<D: Document> IndexWriter<D> {
         // dropping the last reference to the segment_updater.
         self.drop_sender();
 
-        let done_receivers = std::mem::take(&mut self.done_receivers);
-        for receiver in done_receivers {
-            receiver
-                .recv()
-                .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?
+        let mut done_receivers = std::mem::take(&mut self.done_receivers);
+        for receiver in done_receivers.drain(..) {
+            self.runtime
+                .block_on(async move { receiver.await })
+                .map_err(|_| error_in_index_worker_thread("Worker thread panicked."))?
                 .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?;
         }
 
@@ -411,7 +412,7 @@ impl<D: Document> IndexWriter<D> {
         let segment_updater = self.segment_updater.clone();
 
         let mut delete_cursor = self.delete_queue.cursor();
-        let (done_notifer, done_receiver) = crossbeam_channel::bounded::<crate::Result<()>>(0);
+        let (done_notifer, done_receiver) = oneshot::channel();
         let mem_budget = self.memory_budget_in_bytes_per_thread;
         let index = self.index.clone();
         self.runtime.spawn(async move {
@@ -633,12 +634,12 @@ impl<D: Document> IndexWriter<D> {
         // and recreate a new one.
         self.recreate_document_channel();
 
-        let done_receivers = std::mem::take(&mut self.done_receivers);
-
-        for worker_handle in done_receivers {
-            let _ = worker_handle
-                .recv()
-                .map_err(|e| TantivyError::ErrorInThread(format!("{e:?}")))??;
+        let mut done_receivers = std::mem::take(&mut self.done_receivers);
+        for receiver in done_receivers.drain(..) {
+            let indexing_worker_result = self.runtime
+                .block_on(async move { receiver.await })
+                .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?;
+            indexing_worker_result?;
             self.add_indexing_worker()?;
         }
 
@@ -808,9 +809,12 @@ impl<D: Document> Drop for IndexWriter<D> {
     fn drop(&mut self) {
         self.segment_updater.kill();
         self.drop_sender();
-        for receiver in self.done_receivers.drain(..) {
-            let _ = receiver.recv();
-        }
+        let mut receivers = std::mem::take(&mut self.done_receivers);
+        self.runtime.block_on(async move {
+            for receiver in receivers.drain(..) {
+                let _ = receiver.await;
+            }
+        });
     }
 }
 
