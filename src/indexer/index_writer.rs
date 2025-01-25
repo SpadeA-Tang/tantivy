@@ -348,6 +348,7 @@ impl<D: Document> IndexWriter<D> {
         for receiver in done_receivers {
             receiver
                 .recv()
+                .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?
                 .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?;
         }
 
@@ -405,8 +406,7 @@ impl<D: Document> IndexWriter<D> {
         let segment_updater = self.segment_updater.clone();
 
         let mut delete_cursor = self.delete_queue.cursor();
-        let (done_notifer, done_receiver) =
-            crossbeam_channel::bounded::<crate::Result<()>>(self.num_threads);
+        let (done_notifer, done_receiver) = crossbeam_channel::bounded::<crate::Result<()>>(0);
         let mem_budget = self.memory_budget_in_bytes_per_thread;
         let index = self.index.clone();
         self.pool.execute(move || {
@@ -441,7 +441,7 @@ impl<D: Document> IndexWriter<D> {
                     &segment_updater,
                     delete_cursor.clone(),
                 ) {
-                    done_notifer.send(Err(e));
+                    let _ = done_notifer.send(Err(e));
                     return;
                 }
             }
@@ -633,7 +633,7 @@ impl<D: Document> IndexWriter<D> {
         for worker_handle in done_receivers {
             let _ = worker_handle
                 .recv()
-                .map_err(|e| TantivyError::ErrorInThread(format!("{e:?}")))?;
+                .map_err(|e| TantivyError::ErrorInThread(format!("{e:?}")))??;
             self.add_indexing_worker()?;
         }
 
