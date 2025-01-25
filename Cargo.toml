@@ -15,7 +15,6 @@ rust-version = "1.75"
 exclude = ["benches/*.json", "benches/*.txt"]
 
 [dependencies]
-threadpool = "1.8.1"
 oneshot = "0.1.7"
 base64 = "0.22.0"
 byteorder = "1.4.3"
@@ -56,6 +55,7 @@ fastdivide = "0.4.0"
 itertools = "0.13.0"
 measure_time = "0.9.0"
 arc-swap = "1.5.0"
+tokio = { version = "1", features = ["full"] }
 
 columnar = { version = "0.3", path = "./columnar", package = "tantivy-columnar" }
 sstable = { version = "0.3", path = "./sstable", package = "tantivy-sstable", optional = true }

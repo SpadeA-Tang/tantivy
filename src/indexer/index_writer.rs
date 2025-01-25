@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use common::BitSet;
 use smallvec::smallvec;
-use threadpool::ThreadPool;
+use tokio::runtime::{Builder, Runtime};
 
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
@@ -75,7 +75,7 @@ pub struct IndexWriter<D: Document = TantivyDocument> {
     stamper: Stamper,
     committed_opstamp: Opstamp,
 
-    pool: ThreadPool,
+    runtime: Runtime,
     done_receivers: Vec<crossbeam_channel::Receiver<crate::Result<()>>>,
 }
 
@@ -300,6 +300,11 @@ impl<D: Document> IndexWriter<D> {
             num_merge_threads,
         )?;
 
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(num_threads)
+            .thread_name("index-writer-worker")
+            .enable_all()
+            .build()?;
         let mut index_writer = Self {
             _directory_lock: Some(directory_lock),
 
@@ -320,7 +325,7 @@ impl<D: Document> IndexWriter<D> {
             stamper,
 
             worker_id: 0,
-            pool: ThreadPool::new(num_threads),
+            runtime,
             done_receivers: Vec::with_capacity(num_threads),
         };
         index_writer.start_workers()?;
@@ -409,7 +414,7 @@ impl<D: Document> IndexWriter<D> {
         let (done_notifer, done_receiver) = crossbeam_channel::bounded::<crate::Result<()>>(0);
         let mem_budget = self.memory_budget_in_bytes_per_thread;
         let index = self.index.clone();
-        self.pool.execute(move || {
+        self.runtime.spawn(async move {
             loop {
                 let mut document_iterator = document_receiver_clone
                     .clone()
