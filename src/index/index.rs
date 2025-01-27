@@ -3,7 +3,10 @@ use std::fmt;
 #[cfg(feature = "mmap")]
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread::available_parallelism;
+
+use tokio::runtime::Runtime;
 
 use super::segment::Segment;
 use super::segment_reader::merge_field_meta_data;
@@ -545,6 +548,7 @@ impl Index {
         num_threads: usize,
         overall_memory_budget_in_bytes: usize,
         num_merge_threads: usize,
+        runtime: Arc<Runtime>,
     ) -> crate::Result<IndexWriter<D>> {
         let directory_lock = self
             .directory
@@ -567,6 +571,7 @@ impl Index {
             memory_arena_in_bytes_per_thread,
             directory_lock,
             num_merge_threads,
+            runtime,
         )
     }
 
@@ -580,11 +585,13 @@ impl Index {
         &self,
         num_threads: usize,
         overall_memory_budget_in_bytes: usize,
+        runtime: Arc<Runtime>,
     ) -> crate::Result<IndexWriter<D>> {
         self.writer_with_num_threads_and_num_merge_threads(
             num_threads,
             overall_memory_budget_in_bytes,
             DEFAULT_NUM_MERGE_THREADS,
+            runtime,
         )
     }
 
@@ -594,7 +601,8 @@ impl Index {
     /// Using a single thread gives us a deterministic allocation of DocId.
     #[cfg(test)]
     pub fn writer_for_tests<D: Document>(&self) -> crate::Result<IndexWriter<D>> {
-        self.writer_with_num_threads(1, MEMORY_BUDGET_NUM_BYTES_MIN)
+        let runtime = Arc::new(Runtime::new().unwrap());
+        self.writer_with_num_threads(1, MEMORY_BUDGET_NUM_BYTES_MIN, runtime)
     }
 
     /// Creates a multithreaded writer
@@ -611,13 +619,14 @@ impl Index {
     pub fn writer<D: Document>(
         &self,
         memory_budget_in_bytes: usize,
+        runtime: Arc<Runtime>,
     ) -> crate::Result<IndexWriter<D>> {
         let mut num_threads = std::cmp::min(available_parallelism()?.get(), MAX_NUM_THREAD);
         let memory_budget_num_bytes_per_thread = memory_budget_in_bytes / num_threads;
         if memory_budget_num_bytes_per_thread < MEMORY_BUDGET_NUM_BYTES_MIN {
             num_threads = (memory_budget_in_bytes / MEMORY_BUDGET_NUM_BYTES_MIN).max(1);
         }
-        self.writer_with_num_threads(num_threads, memory_budget_in_bytes)
+        self.writer_with_num_threads(num_threads, memory_budget_in_bytes, runtime)
     }
 
     /// Accessor to the index settings

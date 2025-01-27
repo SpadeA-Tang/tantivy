@@ -4,7 +4,7 @@ use std::sync::Arc;
 use common::BitSet;
 use futures::{future, Stream, StreamExt};
 use smallvec::smallvec;
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::Runtime;
 use tokio::sync::oneshot::{self, Receiver};
 
 use super::operation::{AddOperation, UserOperation};
@@ -77,7 +77,7 @@ pub struct IndexWriter<D: Document = TantivyDocument> {
     stamper: Stamper,
     committed_opstamp: Opstamp,
 
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     done_receivers: Vec<Receiver<crate::Result<()>>>,
 }
 
@@ -275,6 +275,7 @@ impl<D: Document> IndexWriter<D> {
         memory_budget_in_bytes_per_thread: usize,
         directory_lock: DirectoryLock,
         num_merge_threads: usize,
+        runtime: Arc<Runtime>,
     ) -> crate::Result<Self> {
         if memory_budget_in_bytes_per_thread < MEMORY_BUDGET_NUM_BYTES_MIN {
             let err_msg = format!(
@@ -305,11 +306,6 @@ impl<D: Document> IndexWriter<D> {
             num_merge_threads,
         )?;
 
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(num_threads)
-            .thread_name("index-writer-worker")
-            .enable_all()
-            .build()?;
         let mut index_writer = Self {
             _directory_lock: Some(directory_lock),
 
@@ -598,6 +594,7 @@ impl<D: Document> IndexWriter<D> {
             self.memory_budget_in_bytes_per_thread,
             directory_lock,
             self.num_merge_threads,
+            self.runtime.clone(),
         )?;
 
         // the current `self` is dropped right away because of this call.
