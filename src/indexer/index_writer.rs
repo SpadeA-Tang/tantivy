@@ -1,13 +1,12 @@
 use std::ops::Range;
 use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
 
 use common::BitSet;
+use futures::{future, Stream, StreamExt};
 use smallvec::{smallvec, SmallVec};
+use tokio::runtime::Runtime;
 
 use super::operation::{AddOperation, UserOperation};
-use super::pool::TOKIO_RUNTIME;
 use super::segment_updater::SegmentUpdater;
 use super::{AddBatch, AddBatchReceiver, AddBatchSender, PreparedCommit};
 use crate::directory::{DirectoryLock, GarbageCollectionResult, TerminatingWrite};
@@ -61,6 +60,9 @@ pub struct IndexWriterOptions {
     #[builder(default = 4)]
     /// Defines the number of merger threads to use.
     num_merge_threads: usize,
+    /// Tokio Runtime for executing index writer document addition tasks
+    // If not provided, a new tokio runtime will be created with the number of threads equal to `num_worker_threads`
+    runtime: Option<Arc<Runtime>>,
 }
 
 /// `IndexWriter` is the user entry-point to add document to an index.
@@ -78,6 +80,7 @@ pub struct IndexWriter<D: Document = TantivyDocument> {
 
     options: IndexWriterOptions,
 
+    runtime: Arc<Runtime>,
     workers_join_handle: Vec<tokio::task::JoinHandle<Result<(), TantivyError>>>,
 
     index_writer_status: IndexWriterStatus<D>,
@@ -180,34 +183,29 @@ pub(crate) fn advance_deletes(
     Ok(())
 }
 
-async fn index_documents<D: Document>(
+async fn index_documents<D: Document, S>(
     memory_budget: usize,
     segment: Segment,
-    first_batch: AddBatch<D>,
-    receiver: &AddBatchReceiver<D>,
+    grouped_document_iterator: &mut S,
     segment_updater: &SegmentUpdater,
     mut delete_cursor: DeleteCursor,
-) -> crate::Result<()> {
+) -> crate::Result<()>
+where
+    S: Stream<Item = AddBatch<D>> + Unpin,
+{
     let mut segment_writer = SegmentWriter::for_segment(memory_budget, segment.clone())?;
-    for doc in first_batch {
-        segment_writer.add_document(doc)?;
-    }
-    loop {
-        if let Ok(document_group) = receiver.recv().await {
-            for doc in document_group {
-                segment_writer.add_document(doc)?;
-            }
-            let mem_usage = segment_writer.mem_usage();
-            if mem_usage >= memory_budget - MARGIN_IN_BYTES {
-                info!(
-                    "Buffer limit reached, flushing segment with maxdoc={}.",
-                    segment_writer.max_doc()
-                );
-                break;
-            }
-            continue;
+    while let Some(document_group) = grouped_document_iterator.next().await {
+        for doc in document_group {
+            segment_writer.add_document(doc)?;
         }
-        break;
+        let mem_usage = segment_writer.mem_usage();
+        if mem_usage >= memory_budget - MARGIN_IN_BYTES {
+            info!(
+                "Buffer limit reached, flushing segment with maxdoc={}.",
+                segment_writer.max_doc()
+            );
+            break;
+        }
     }
 
     if !segment_updater.is_alive() {
@@ -309,6 +307,17 @@ impl<D: Document> IndexWriter<D> {
             return Err(TantivyError::InvalidArgument(err_msg));
         }
 
+        let runtime = match options.runtime {
+            Some(ref runtime) => runtime.clone(),
+            None => Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(options.num_worker_threads)
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime"),
+            ),
+        };
+
         let (document_sender, document_receiver): (AddBatchSender<D>, AddBatchReceiver<D>) =
             async_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
 
@@ -343,6 +352,7 @@ impl<D: Document> IndexWriter<D> {
             stamper,
 
             worker_id: 0,
+            runtime,
         };
         index_writer.start_workers()?;
         Ok(index_writer)
@@ -367,7 +377,7 @@ impl<D: Document> IndexWriter<D> {
 
         let former_workers_handles = std::mem::take(&mut self.workers_join_handle);
         for join_handle in former_workers_handles {
-            TOKIO_RUNTIME
+            self.runtime
                 .block_on(join_handle)
                 .map_err(|_| error_in_index_worker_thread("Worker thread panicked."))?
                 .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?;
@@ -431,38 +441,33 @@ impl<D: Document> IndexWriter<D> {
         let mem_budget = self.options.memory_budget_per_thread;
         let index = self.index.clone();
 
-        let join_handle = TOKIO_RUNTIME.spawn(async move {
+        let join_handle = self.runtime.spawn(async move {
             loop {
-                let first_batch;
-                loop {
-                    // The peeking here is to avoid creating a new segment's files
-                    // if no document are available.
-                    //
-                    // This is a valid guarantee as the peeked document now belongs to
-                    // our local iterator.
-                    if let Ok(batch) = document_receiver_clone.recv().await {
-                        if batch.is_empty() {
-                            // ignore the empty batch.
-                            continue;
-                        } else {
-                            delete_cursor.skip_to(batch[0].opstamp);
-                            // update the delete cursor
-                            first_batch = batch;
-                            break;
-                        }
-                    } else {
-                        // No more documents.
-                        // It happens when there is a commit, or if the `IndexWriter`
-                        // was dropped.
-                        index_writer_bomb.defuse();
-                        return Ok(());
-                    }
-                }
+                // The peeking here is to avoid creating a new segment's files
+                // if no document are available.
+                //
+                // This is a valid guarantee as the peeked document now belongs to
+                // our local iterator.
+                let mut filtered_receiver =
+                    std::pin::pin!(Box::pin(document_receiver_clone.clone())
+                        .filter(|batch| future::ready(!batch.is_empty()))
+                        .peekable());
+
+                if let Some(first_batch) = filtered_receiver.as_mut().peek().await {
+                    assert!(!first_batch.is_empty());
+                    delete_cursor.skip_to(first_batch[0].opstamp);
+                } else {
+                    // No more documents.
+                    // It happens when there is a commit, or if the `IndexWriter`
+                    // was dropped.
+                    index_writer_bomb.defuse();
+                    return Ok(());
+                };
+
                 index_documents(
                     mem_budget,
                     index.new_segment(),
-                    first_batch,
-                    &document_receiver_clone,
+                    &mut filtered_receiver,
                     &segment_updater,
                     delete_cursor.clone(),
                 )
@@ -600,7 +605,7 @@ impl<D: Document> IndexWriter<D> {
         //
         // This will reach an end as the only document_sender
         // was dropped with the index_writer.
-        TOKIO_RUNTIME.block_on(async move {
+        self.runtime.block_on(async move {
             if let Ok(document_receiver) = document_receiver_res {
                 while document_receiver.recv().await.is_ok() {}
             }
@@ -650,7 +655,8 @@ impl<D: Document> IndexWriter<D> {
         let former_workers_join_handle = std::mem::take(&mut self.workers_join_handle);
 
         for worker_handle in former_workers_join_handle {
-            let indexing_worker_result = TOKIO_RUNTIME
+            let indexing_worker_result = self
+                .runtime
                 .block_on(worker_handle)
                 .map_err(|e| TantivyError::ErrorInThread(format!("{e:?}")))?;
             indexing_worker_result?;
@@ -814,7 +820,10 @@ impl<D: Document> IndexWriter<D> {
         if self.index_writer_status.is_alive() {
             let sender: Arc<async_channel::Sender<SmallVec<[AddOperation<D>; 4]>>> =
                 Arc::clone(&self.operation_sender);
-            if TOKIO_RUNTIME.block_on(async move { sender.send(add_ops).await.is_ok() }) {
+            if self
+                .runtime
+                .block_on(async move { sender.send(add_ops).await.is_ok() })
+            {
                 return Ok(());
             }
         }
@@ -827,7 +836,7 @@ impl<D: Document> Drop for IndexWriter<D> {
         self.segment_updater.kill();
         self.drop_sender();
         for work in self.workers_join_handle.drain(..) {
-            let _ = TOKIO_RUNTIME.block_on(work);
+            let _ = self.runtime.block_on(work);
         }
     }
 }

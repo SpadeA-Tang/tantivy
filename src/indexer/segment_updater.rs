@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use rayon::ThreadPool;
 
 use super::pool;
 use super::segment_manager::SegmentManager;
