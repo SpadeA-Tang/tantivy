@@ -1,10 +1,15 @@
+use std::cell::RefCell;
+use std::future::Future;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use common::BitSet;
 use futures::{future, Stream, StreamExt};
+use pin_project::pin_project;
 use smallvec::{smallvec, SmallVec};
 use tokio::runtime::Runtime;
+use tokio::task::yield_now;
 
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
@@ -62,6 +67,8 @@ pub struct IndexWriterOptions {
     num_merge_threads: usize,
     /// Tokio Runtime for executing index writer document addition tasks
     // If not provided, a new tokio runtime will be created with the number of threads equal to `num_worker_threads`
+    // "warning": Now, the tantivy async is not for operation channels, the actual IO is synchronous.
+    // So, only share the runtime in RAM mode.
     runtime: Option<Arc<Runtime>>,
 }
 
@@ -183,6 +190,42 @@ pub(crate) fn advance_deletes(
     Ok(())
 }
 
+thread_local! {
+    static EXECUTION_START_TIME: RefCell<Option<Instant>> = RefCell::new(Some(Instant::now()));
+}
+
+#[derive(Default)]
+#[pin_project]
+struct HandleWithExecutionTimeSet<F> {
+    #[pin]
+    fut: F,
+}
+
+impl<F> Future for HandleWithExecutionTimeSet<F>
+where
+    F: Future,
+{
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        EXECUTION_START_TIME.with(|start_time| {
+            *start_time.borrow_mut() = Some(Instant::now());
+        });
+
+        let this = self.project();
+        let res = this.fut.poll(cx);
+
+        EXECUTION_START_TIME.with(|start_time| {
+            start_time.borrow_mut().take();
+        });
+
+        res
+    }
+}
+
 async fn index_documents<D: Document, S>(
     memory_budget: usize,
     segment: Segment,
@@ -194,6 +237,7 @@ where
     S: Stream<Item = AddBatch<D>> + Unpin,
 {
     let mut segment_writer = SegmentWriter::for_segment(memory_budget, segment.clone())?;
+    let mut count = 0;
     while let Some(document_group) = grouped_document_iterator.next().await {
         for doc in document_group {
             segment_writer.add_document(doc)?;
@@ -205,6 +249,14 @@ where
                 segment_writer.max_doc()
             );
             break;
+        }
+        count += 1;
+
+        // Check whether to yield after processing every 5 documents. This is necessary given that we could
+        // share runtime across multiple index writers where in ram mode, a hot writer can occupy the executor
+        // for very long time.
+        if count % 5 == 0 && need_yield() {
+            yield_now().await;
         }
     }
 
@@ -230,6 +282,15 @@ where
     let segment_entry = SegmentEntry::new(meta, delete_cursor, alive_bitset_opt);
     segment_updater.schedule_add_segment(segment_entry).wait()?;
     Ok(())
+}
+
+#[inline]
+fn need_yield() -> bool {
+    EXECUTION_START_TIME.with(|start_time| {
+        start_time
+            .borrow()
+            .map_or(false, |t| t.elapsed() > Duration::from_millis(20))
+    })
 }
 
 /// `doc_opstamps` is required to be non-empty.
@@ -442,37 +503,41 @@ impl<D: Document> IndexWriter<D> {
         let index = self.index.clone();
 
         let join_handle = self.runtime.spawn(async move {
-            loop {
-                // The peeking here is to avoid creating a new segment's files
-                // if no document are available.
-                //
-                // This is a valid guarantee as the peeked document now belongs to
-                // our local iterator.
-                let mut filtered_receiver =
-                    std::pin::pin!(Box::pin(document_receiver_clone.clone())
-                        .filter(|batch| future::ready(!batch.is_empty()))
-                        .peekable());
+            let fut = async move {
+                loop {
+                    // The peeking here is to avoid creating a new segment's files
+                    // if no document are available.
+                    //
+                    // This is a valid guarantee as the peeked document now belongs to
+                    // our local iterator.
+                    let mut filtered_receiver =
+                        std::pin::pin!(Box::pin(document_receiver_clone.clone())
+                            .filter(|batch| future::ready(!batch.is_empty()))
+                            .peekable());
 
-                if let Some(first_batch) = filtered_receiver.as_mut().peek().await {
-                    assert!(!first_batch.is_empty());
-                    delete_cursor.skip_to(first_batch[0].opstamp);
-                } else {
-                    // No more documents.
-                    // It happens when there is a commit, or if the `IndexWriter`
-                    // was dropped.
-                    index_writer_bomb.defuse();
-                    return Ok(());
-                };
+                    if let Some(first_batch) = filtered_receiver.as_mut().peek().await {
+                        assert!(!first_batch.is_empty());
+                        delete_cursor.skip_to(first_batch[0].opstamp);
+                    } else {
+                        // No more documents.
+                        // It happens when there is a commit, or if the `IndexWriter`
+                        // was dropped.
+                        index_writer_bomb.defuse();
+                        return Ok(());
+                    };
 
-                index_documents(
-                    mem_budget,
-                    index.new_segment(),
-                    &mut filtered_receiver,
-                    &segment_updater,
-                    delete_cursor.clone(),
-                )
-                .await?;
-            }
+                    index_documents(
+                        mem_budget,
+                        index.new_segment(),
+                        &mut filtered_receiver,
+                        &segment_updater,
+                        delete_cursor.clone(),
+                    )
+                    .await?;
+                }
+            };
+
+            HandleWithExecutionTimeSet { fut }.await
         });
         self.worker_id += 1;
         self.workers_join_handle.push(join_handle);

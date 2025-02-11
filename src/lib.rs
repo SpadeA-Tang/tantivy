@@ -201,6 +201,7 @@ pub mod termdict;
 
 mod docset;
 mod reader;
+mod traker;
 
 #[cfg(test)]
 mod compat_tests;
