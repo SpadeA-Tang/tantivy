@@ -1,6 +1,8 @@
+use std::fmt;
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::{fmt, io};
+use std::task;
+use tokio::io;
 
 pub use stable_deref_trait::StableDeref;
 
@@ -181,7 +183,8 @@ impl PartialEq<str> for OwnedBytes {
 }
 
 impl<'a, T: ?Sized> PartialEq<&'a T> for OwnedBytes
-where OwnedBytes: PartialEq<T>
+where
+    OwnedBytes: PartialEq<T>,
 {
     fn eq(&self, other: &&'a T) -> bool {
         *self == **other
@@ -204,7 +207,28 @@ impl AsRef<[u8]> for OwnedBytes {
     }
 }
 
-impl io::Read for OwnedBytes {
+impl io::AsyncRead for OwnedBytes {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut task::Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let data_len = this.data.len();
+        let buf_len = buf.capacity();
+        if data_len >= buf_len {
+            let data = this.advance(buf_len);
+            buf.put_slice(data);
+            task::Poll::Ready(Ok(()))
+        } else {
+            buf.put_slice(&this.data);
+            this.data = &[];
+            task::Poll::Ready(Ok(()))
+        }
+    }
+}
+
+impl std::io::Read for OwnedBytes {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let data_len = self.data.len();

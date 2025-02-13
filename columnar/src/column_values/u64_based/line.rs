@@ -1,7 +1,9 @@
 use std::io;
 use std::num::NonZeroU32;
 
+use async_trait::async_trait;
 use common::{BinarySerializable, VInt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::column_values::ColumnValues;
 
@@ -144,14 +146,15 @@ impl Line {
     }
 }
 
+#[async_trait]
 impl BinarySerializable for Line {
-    fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         VInt(self.slope).serialize(writer)?;
         VInt(self.intercept).serialize(writer)?;
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let slope = VInt::deserialize(reader)?.0;
         let intercept = VInt::deserialize(reader)?.0;
         Ok(Line { slope, intercept })

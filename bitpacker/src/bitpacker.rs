@@ -1,7 +1,7 @@
-use std::io;
 use std::ops::{Range, RangeInclusive};
 
 use bitpacking::{BitPacker as ExternalBitPackerTrait, BitPacker1x};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 
 pub struct BitPacker {
     mini_buffer: u64,
@@ -22,7 +22,7 @@ impl BitPacker {
     }
 
     #[inline]
-    pub fn write<TWrite: io::Write + ?Sized>(
+    pub async fn write<TWrite: AsyncWrite + Unpin + Send + ?Sized>(
         &mut self,
         val: u64,
         num_bits: u8,
@@ -31,14 +31,14 @@ impl BitPacker {
         let num_bits = num_bits as usize;
         if self.mini_buffer_written + num_bits > 64 {
             self.mini_buffer |= val.wrapping_shl(self.mini_buffer_written as u32);
-            output.write_all(self.mini_buffer.to_le_bytes().as_ref())?;
+            output.write_all(self.mini_buffer.to_le_bytes().as_ref()).await?;
             self.mini_buffer = val.wrapping_shr((64 - self.mini_buffer_written) as u32);
             self.mini_buffer_written = self.mini_buffer_written + num_bits - 64;
         } else {
             self.mini_buffer |= val << self.mini_buffer_written;
             self.mini_buffer_written += num_bits;
             if self.mini_buffer_written == 64 {
-                output.write_all(self.mini_buffer.to_le_bytes().as_ref())?;
+                output.write_all(self.mini_buffer.to_le_bytes().as_ref()).await?;
                 self.mini_buffer_written = 0;
                 self.mini_buffer = 0u64;
             }
@@ -46,19 +46,19 @@ impl BitPacker {
         Ok(())
     }
 
-    pub fn flush<TWrite: io::Write + ?Sized>(&mut self, output: &mut TWrite) -> io::Result<()> {
+    pub async fn flush<TWrite: AsyncWrite + Unpin + Send + ?Sized>(&mut self, output: &mut TWrite) -> io::Result<()> {
         if self.mini_buffer_written > 0 {
             let num_bytes = (self.mini_buffer_written + 7) / 8;
             let bytes = self.mini_buffer.to_le_bytes();
-            output.write_all(&bytes[..num_bytes])?;
+            output.write_all(&bytes[..num_bytes]).await?;
             self.mini_buffer_written = 0;
             self.mini_buffer = 0;
         }
         Ok(())
     }
 
-    pub fn close<TWrite: io::Write + ?Sized>(&mut self, output: &mut TWrite) -> io::Result<()> {
-        self.flush(output)?;
+    pub async fn close<TWrite: AsyncWrite + Unpin + Send + ?Sized>(&mut self, output: &mut TWrite) -> io::Result<()> {
+        self.flush(output).await?;
         Ok(())
     }
 }

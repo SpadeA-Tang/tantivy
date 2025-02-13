@@ -1,55 +1,70 @@
-use std::borrow::Cow;
-use std::io::{Read, Write};
-use std::{fmt, io};
+use async_trait::async_trait;
+use std::fmt;
+use std::{borrow::Cow, pin, task::Poll};
+use tokio::io::{self, AsyncRead, AsyncWrite};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use byteorder::{ReadBytesExt, WriteBytesExt};
-
-use crate::{Endianness, VInt};
+use crate::VInt;
 
 #[derive(Default)]
 struct Counter(u64);
 
-impl io::Write for Counter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0 += buf.len() as u64;
-        Ok(buf.len())
+impl AsyncWrite for Counter {
+    fn poll_write(
+        self: pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        self.get_mut().0 += buf.len() as u64;
+        Poll::Ready(Ok(buf.len()))
     }
 
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.0 += buf.len() as u64;
-        Ok(())
+    fn poll_flush(
+        self: pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+    fn poll_shutdown(
+        self: pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
     }
 }
 
 /// Trait for a simple binary serialization.
+#[async_trait]
 pub trait BinarySerializable: fmt::Debug + Sized {
     /// Serialize
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()>;
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()>;
     /// Deserialize
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self>;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self>;
 
-    fn num_bytes(&self) -> u64 {
+    async fn num_bytes(&self) -> u64 {
         let mut counter = Counter::default();
-        self.serialize(&mut counter).unwrap();
+        self.serialize(&mut counter).await.unwrap();
         counter.0
     }
 }
 
+#[async_trait]
 pub trait DeserializeFrom<T: BinarySerializable> {
-    fn deserialize(&mut self) -> io::Result<T>;
+    async fn deserialize(&mut self) -> io::Result<T>;
 }
 
 /// Implement deserialize from &[u8] for all types which implement BinarySerializable.
 ///
 /// TryFrom would actually be preferable, but not possible because of the orphan
 /// rules (not completely sure if this could be resolved)
+#[async_trait]
 impl<T: BinarySerializable> DeserializeFrom<T> for &[u8] {
-    fn deserialize(&mut self) -> io::Result<T> {
-        T::deserialize(self)
+    async fn deserialize(&mut self) -> io::Result<T> {
+        T::deserialize(self).await
     }
 }
 
@@ -59,11 +74,12 @@ pub trait FixedSize: BinarySerializable {
     const SIZE_IN_BYTES: usize;
 }
 
+#[async_trait]
 impl BinarySerializable for () {
-    fn serialize<W: Write + ?Sized>(&self, _: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, _: &mut W) -> io::Result<()> {
         Ok(())
     }
-    fn deserialize<R: Read>(_: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(_: &mut R) -> io::Result<Self> {
         Ok(())
     }
 }
@@ -72,47 +88,70 @@ impl FixedSize for () {
     const SIZE_IN_BYTES: usize = 0;
 }
 
-impl<T: BinarySerializable> BinarySerializable for Vec<T> {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        BinarySerializable::serialize(&VInt(self.len() as u64), writer)?;
+#[async_trait]
+impl<T: BinarySerializable + Send + Sync> BinarySerializable for Vec<T> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        BinarySerializable::serialize(&VInt(self.len() as u64), writer).await?;
         for it in self {
-            it.serialize(writer)?;
+            it.serialize(writer).await?;
         }
         Ok(())
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Vec<T>> {
-        let num_items = <VInt as BinarySerializable>::deserialize(reader)?.val();
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Vec<T>> {
+        let num_items = <VInt as BinarySerializable>::deserialize(reader)
+            .await?
+            .val();
         let mut items: Vec<T> = Vec::with_capacity(num_items as usize);
         for _ in 0..num_items {
-            let item = T::deserialize(reader)?;
+            let item = T::deserialize(reader).await?;
             items.push(item);
         }
         Ok(items)
     }
 }
 
-impl<Left: BinarySerializable, Right: BinarySerializable> BinarySerializable for (Left, Right) {
-    fn serialize<W: Write + ?Sized>(&self, write: &mut W) -> io::Result<()> {
-        self.0.serialize(write)?;
-        self.1.serialize(write)
+#[async_trait]
+impl<Left: BinarySerializable + Send + Sync, Right: BinarySerializable + Send + Sync>
+    BinarySerializable for (Left, Right)
+{
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        write: &mut W,
+    ) -> io::Result<()> {
+        self.0.serialize(write).await?;
+        self.1.serialize(write).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        Ok((Left::deserialize(reader)?, Right::deserialize(reader)?))
+
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        Ok((
+            Left::deserialize(reader).await?,
+            Right::deserialize(reader).await?,
+        ))
     }
 }
-impl<Left: BinarySerializable + FixedSize, Right: BinarySerializable + FixedSize> FixedSize
-    for (Left, Right)
+
+impl<
+        Left: BinarySerializable + FixedSize + Send + Sync,
+        Right: BinarySerializable + FixedSize + Send + Sync,
+    > FixedSize for (Left, Right)
 {
     const SIZE_IN_BYTES: usize = Left::SIZE_IN_BYTES + Right::SIZE_IN_BYTES;
 }
 
+#[async_trait]
 impl BinarySerializable for u32 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_u32::<Endianness>(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_u32_le(*self).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<u32> {
-        reader.read_u32::<Endianness>()
+    async fn deserialize<R: AsyncRead + Send + Unpin>(reader: &mut R) -> io::Result<u32> {
+        reader.read_u32_le().await
     }
 }
 
@@ -120,13 +159,17 @@ impl FixedSize for u32 {
     const SIZE_IN_BYTES: usize = 4;
 }
 
+#[async_trait]
 impl BinarySerializable for u16 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_u16::<Endianness>(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_u16_le(*self).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<u16> {
-        reader.read_u16::<Endianness>()
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<u16> {
+        reader.read_u16_le().await
     }
 }
 
@@ -134,12 +177,16 @@ impl FixedSize for u16 {
     const SIZE_IN_BYTES: usize = 2;
 }
 
+#[async_trait]
 impl BinarySerializable for u64 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_u64::<Endianness>(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_u64_le(*self).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        reader.read_u64::<Endianness>()
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        reader.read_u64_le().await
     }
 }
 
@@ -147,12 +194,16 @@ impl FixedSize for u64 {
     const SIZE_IN_BYTES: usize = 8;
 }
 
+#[async_trait]
 impl BinarySerializable for u128 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_u128::<Endianness>(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_u128_le(*self).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        reader.read_u128::<Endianness>()
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        reader.read_u128_le().await
     }
 }
 
@@ -160,12 +211,16 @@ impl FixedSize for u128 {
     const SIZE_IN_BYTES: usize = 16;
 }
 
+#[async_trait]
 impl BinarySerializable for f32 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_f32::<Endianness>(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_f32_le(*self).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        reader.read_f32::<Endianness>()
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        reader.read_f32_le().await
     }
 }
 
@@ -173,12 +228,17 @@ impl FixedSize for f32 {
     const SIZE_IN_BYTES: usize = 4;
 }
 
+#[async_trait]
 impl BinarySerializable for i64 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_i64::<Endianness>(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_i64_le(*self).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        reader.read_i64::<Endianness>()
+
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        reader.read_i64_le().await
     }
 }
 
@@ -186,38 +246,49 @@ impl FixedSize for i64 {
     const SIZE_IN_BYTES: usize = 8;
 }
 
+#[async_trait]
 impl BinarySerializable for f64 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_f64::<Endianness>(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_f64_le(*self).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        reader.read_f64::<Endianness>()
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        reader.read_f64_le().await
     }
 }
 
 impl FixedSize for f64 {
     const SIZE_IN_BYTES: usize = 8;
 }
-
+#[async_trait]
 impl BinarySerializable for u8 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_u8(*self)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_u8(*self).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<u8> {
-        reader.read_u8()
+
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<u8> {
+        reader.read_u8().await
     }
 }
 
 impl FixedSize for u8 {
     const SIZE_IN_BYTES: usize = 1;
 }
-
+#[async_trait]
 impl BinarySerializable for bool {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_u8(u8::from(*self))
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_u8(u8::from(*self)).await
     }
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<bool> {
-        let val = reader.read_u8()?;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<bool> {
+        let val = reader.read_u8().await?;
         match val {
             0 => Ok(false),
             1 => Ok(true),
@@ -232,55 +303,74 @@ impl BinarySerializable for bool {
 impl FixedSize for bool {
     const SIZE_IN_BYTES: usize = 1;
 }
-
+#[async_trait]
 impl BinarySerializable for String {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         let data: &[u8] = self.as_bytes();
-        BinarySerializable::serialize(&VInt(data.len() as u64), writer)?;
-        writer.write_all(data)
+        BinarySerializable::serialize(&VInt(data.len() as u64), writer).await?;
+        writer.write_all(data).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<String> {
-        let string_length = <VInt as BinarySerializable>::deserialize(reader)?.val() as usize;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<String> {
+        let string_length = <VInt as BinarySerializable>::deserialize(reader)
+            .await?
+            .val() as usize;
         let mut result = String::with_capacity(string_length);
         reader
             .take(string_length as u64)
-            .read_to_string(&mut result)?;
+            .read_to_string(&mut result)
+            .await?;
         Ok(result)
     }
 }
 
+#[async_trait]
 impl<'a> BinarySerializable for Cow<'a, str> {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         let data: &[u8] = self.as_bytes();
-        BinarySerializable::serialize(&VInt(data.len() as u64), writer)?;
-        writer.write_all(data)
+        BinarySerializable::serialize(&VInt(data.len() as u64), writer).await?;
+        writer.write_all(data).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Cow<'a, str>> {
-        let string_length = <VInt as BinarySerializable>::deserialize(reader)?.val() as usize;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Cow<'a, str>> {
+        let string_length = <VInt as BinarySerializable>::deserialize(reader)
+            .await?
+            .val() as usize;
         let mut result = String::with_capacity(string_length);
         reader
             .take(string_length as u64)
-            .read_to_string(&mut result)?;
+            .read_to_string(&mut result)
+            .await?;
         Ok(Cow::Owned(result))
     }
 }
 
+#[async_trait]
 impl<'a> BinarySerializable for Cow<'a, [u8]> {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        BinarySerializable::serialize(&VInt(self.len() as u64), writer)?;
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        BinarySerializable::serialize(&VInt(self.len() as u64), writer).await?;
         for it in self.iter() {
-            BinarySerializable::serialize(it, writer)?;
+            BinarySerializable::serialize(it, writer).await?;
         }
         Ok(())
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Cow<'a, [u8]>> {
-        let num_items = <VInt as BinarySerializable>::deserialize(reader)?.val();
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Cow<'a, [u8]>> {
+        let num_items = <VInt as BinarySerializable>::deserialize(reader)
+            .await?
+            .val();
         let mut items: Vec<u8> = Vec::with_capacity(num_items as usize);
         for _ in 0..num_items {
-            let item = <u8 as BinarySerializable>::deserialize(reader)?;
+            let item = <u8 as BinarySerializable>::deserialize(reader).await?;
             items.push(item);
         }
         Ok(Cow::Owned(items))

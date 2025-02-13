@@ -486,14 +486,14 @@ struct ValueAddr {
     type_id: ValueType,
     /// This is the address to the value in the vec, except for bool and null, which are inlined
     val_addr: Addr,
-}
+}#[async_trait]
 impl BinarySerializable for ValueAddr {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         self.type_id.serialize(writer)?;
         VInt(self.val_addr as u64).serialize(writer)
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let type_id = ValueType::deserialize(reader)?;
         let val_addr = VInt::deserialize(reader)?.0 as u32;
         Ok(ValueAddr { type_id, val_addr })
@@ -543,14 +543,14 @@ pub enum ValueType {
     /// Pre-tokenized str type,
     Array = 12,
 }
-
+#[async_trait]
 impl BinarySerializable for ValueType {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         (*self as u8).serialize(writer)?;
         Ok(())
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let num = u8::deserialize(reader)?;
         let type_id = if (0..=12).contains(&num) {
             unsafe { std::mem::transmute::<u8, ValueType>(num) }

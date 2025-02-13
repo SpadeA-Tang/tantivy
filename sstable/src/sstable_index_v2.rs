@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use common::OwnedBytes;
 use tantivy_fst::Automaton;
 
@@ -119,6 +120,7 @@ pub(crate) struct BlockMeta {
 /// obtained from lengths.
 struct IndexSSTable;
 
+#[async_trait]
 impl SSTable for IndexSSTable {
     type Value = BlockAddr;
 

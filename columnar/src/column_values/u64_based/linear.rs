@@ -1,7 +1,8 @@
-use std::io;
 
+use async_trait::async_trait;
 use common::{BinarySerializable, OwnedBytes};
 use tantivy_bitpacker::{compute_num_bits, BitPacker, BitUnpacker};
+use tokio::io::{self, AsyncRead, AsyncWrite};
 
 use super::line::Line;
 use super::ColumnValues;
@@ -55,14 +56,15 @@ struct LinearParams {
     bit_unpacker: BitUnpacker,
 }
 
+#[async_trait]
 impl BinarySerializable for LinearParams {
-    fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         self.line.serialize(writer)?;
         self.bit_unpacker.bit_width().serialize(writer)?;
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let line = Line::deserialize(reader)?;
         let bit_width = u8::deserialize(reader)?;
         Ok(Self {
@@ -96,6 +98,7 @@ impl Default for LinearCodecEstimator {
     }
 }
 
+#[async_trait]
 impl ColumnCodecEstimator for LinearCodecEstimator {
     fn finalize(&mut self) {
         if let Some(line) = self.line.as_mut() {
@@ -121,11 +124,11 @@ impl ColumnCodecEstimator for LinearCodecEstimator {
         )
     }
 
-    fn serialize(
+    async fn serialize(
         &self,
         stats: &ColumnStats,
         vals: &mut dyn Iterator<Item = u64>,
-        wrt: &mut dyn io::Write,
+        wrt: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> io::Result<()> {
         stats.serialize(wrt)?;
         let line = self.line.unwrap();

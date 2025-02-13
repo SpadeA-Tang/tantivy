@@ -1,17 +1,19 @@
 use crate::column_index::optional_index::{SelectCursor, Set, SetCodec};
-
+use async_trait::async_trait;
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 pub struct SparseBlockCodec;
 
+#[async_trait]
 impl SetCodec for SparseBlockCodec {
     type Item = u16;
     type Reader<'a> = SparseBlock<'a>;
 
-    fn serialize(
-        els: impl Iterator<Item = u16>,
-        mut wrt: impl std::io::Write,
-    ) -> std::io::Result<()> {
+    async fn serialize(
+        els: impl Iterator<Item = u16> + Send,
+        mut wrt: impl AsyncWrite + Unpin + Send,
+    ) -> io::Result<()> {
         for el in els {
-            wrt.write_all(&el.to_le_bytes())?;
+            wrt.write_all(&el.to_le_bytes()).await?;
         }
         Ok(())
     }
@@ -34,7 +36,8 @@ impl<'a> SelectCursor<u16> for SparseBlock<'a> {
 impl Set<u16> for SparseBlock<'_> {
     type SelectCursor<'b>
         = Self
-    where Self: 'b;
+    where
+        Self: 'b;
 
     #[inline(always)]
     fn contains(&self, el: u16) -> bool {

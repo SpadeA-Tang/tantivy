@@ -26,9 +26,9 @@ impl PartialOrd for PreTokenizedString {
         Some(self.cmp(other))
     }
 }
-
+#[async_trait]
 impl BinarySerializable for PreTokenizedString {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         if let Ok(text) = serde_json::to_string(self) {
             <String as BinarySerializable>::serialize(&text, writer)
         } else {
@@ -39,7 +39,7 @@ impl BinarySerializable for PreTokenizedString {
         }
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let json_text = <String as BinarySerializable>::deserialize(reader)?;
 
         if let Ok(value) = serde_json::from_str(&json_text) {

@@ -6,12 +6,14 @@ use std::io::Write;
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common::BinarySerializable;
 pub use dictionary_encoded::{BytesColumn, StrColumn};
 pub use serialize::{
     open_column_bytes, open_column_str, open_column_u128, open_column_u128_as_compact_u64,
     open_column_u64, serialize_column_mappable_to_u128, serialize_column_mappable_to_u64,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::column_index::{ColumnIndex, Set};
 use crate::column_values::monotonic_mapping::StrictlyMonotonicMappingToInternal;
@@ -174,13 +176,14 @@ impl<T: PartialOrd + Copy + Debug + Send + Sync + 'static> Column<T> {
     }
 }
 
+#[async_trait]
 impl BinarySerializable for Cardinality {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.to_code().serialize(writer)
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.to_code().serialize(writer).await
     }
 
-    fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-        let cardinality_code = u8::deserialize(reader)?;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self> {
+        let cardinality_code = u8::deserialize(reader).await?;
         let cardinality = Cardinality::try_from_code(cardinality_code)?;
         Ok(cardinality)
     }

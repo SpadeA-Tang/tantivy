@@ -9,7 +9,7 @@ use std::io;
 /// reading blocks of value, and offering random access within this values.
 pub trait ValueReader: Default {
     /// Type of the value being read.
-    type Value;
+    type Value: Send;
 
     /// Access the value at index `idx`, in the last block that was read
     /// via a call to `ValueReader::read`.
@@ -25,7 +25,7 @@ pub trait ValueReader: Default {
 /// of value.
 pub trait ValueWriter: Default {
     /// Type of the value being written.
-    type Value;
+    type Value: Send;
 
     /// Records a new value.
     /// This method usually just accumulates data in a `Vec`,

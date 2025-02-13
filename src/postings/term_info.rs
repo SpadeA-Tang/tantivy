@@ -36,9 +36,9 @@ impl FixedSize for TermInfo {
     /// The subsequent `TermInfo` are delta encoded and bitpacked.
     const SIZE_IN_BYTES: usize = 3 * u32::SIZE_IN_BYTES + 2 * u64::SIZE_IN_BYTES;
 }
-
+#[async_trait]
 impl BinarySerializable for TermInfo {
-    fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         self.doc_freq.serialize(writer)?;
         (self.postings_range.start as u64).serialize(writer)?;
         self.posting_num_bytes().serialize(writer)?;
@@ -47,7 +47,7 @@ impl BinarySerializable for TermInfo {
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let doc_freq = u32::deserialize(reader)?;
         let postings_start_offset = u64::deserialize(reader)? as usize;
         let postings_num_bytes = u32::deserialize(reader)? as usize;

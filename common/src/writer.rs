@@ -1,11 +1,14 @@
-use std::io::{self, BufWriter, Write};
+use std::{pin::Pin, task::Poll};
+
+use async_trait::async_trait;
+use tokio::io::{self, AsyncWrite, AsyncWriteExt, BufWriter};
 
 pub struct CountingWriter<W> {
     underlying: W,
     written_bytes: u64,
 }
 
-impl<W: Write> CountingWriter<W> {
+impl<W: AsyncWrite> CountingWriter<W> {
     pub fn wrap(underlying: W) -> CountingWriter<W> {
         CountingWriter {
             underlying,
@@ -26,31 +29,44 @@ impl<W: Write> CountingWriter<W> {
     }
 }
 
-impl<W: Write> Write for CountingWriter<W> {
-    #[inline]
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let written_size = self.underlying.write(buf)?;
-        self.written_bytes += written_size as u64;
-        Ok(written_size)
+impl<W: AsyncWrite + Unpin> AsyncWrite for CountingWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        let pinned = Pin::new(&mut self.underlying);
+        match pinned.poll_write(cx, buf) {
+            Poll::Ready(Ok(n)) => {
+                self.written_bytes += n as u64;
+                Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
     }
 
-    #[inline]
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.underlying.write_all(buf)?;
-        self.written_bytes += buf.len() as u64;
-        Ok(())
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        let pinned = Pin::new(&mut self.get_mut().underlying);
+        pinned.poll_flush(cx)
     }
 
-    #[inline]
-    fn flush(&mut self) -> io::Result<()> {
-        self.underlying.flush()
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        let pinned = Pin::new(&mut self.get_mut().underlying);
+        pinned.poll_shutdown(cx)
     }
 }
 
-impl<W: TerminatingWrite> TerminatingWrite for CountingWriter<W> {
+#[async_trait]
+impl<W: TerminatingWrite + Unpin> TerminatingWrite for CountingWriter<W> {
     #[inline]
-    fn terminate_ref(&mut self, token: AntiCallToken) -> io::Result<()> {
-        self.underlying.terminate_ref(token)
+    async fn terminate_ref(&mut self, token: AntiCallToken) -> io::Result<()> {
+        self.underlying.terminate_ref(token).await
     }
 }
 
@@ -62,34 +78,40 @@ impl<W: TerminatingWrite> TerminatingWrite for CountingWriter<W> {
 pub struct AntiCallToken(());
 
 /// Trait used to indicate when no more write need to be done on a writer
-pub trait TerminatingWrite: Write + Send + Sync {
+#[async_trait]
+pub trait TerminatingWrite: AsyncWrite + Send + Sync {
     /// Indicate that the writer will no longer be used. Internally call terminate_ref.
-    fn terminate(mut self) -> io::Result<()>
-    where Self: Sized {
-        self.terminate_ref(AntiCallToken(()))
+    async fn terminate(mut self) -> io::Result<()>
+    where
+        Self: Sized,
+    {
+        self.terminate_ref(AntiCallToken(())).await
     }
 
     /// You should implement this function to define custom behavior.
     /// This function should flush any buffer it may hold.
-    fn terminate_ref(&mut self, _: AntiCallToken) -> io::Result<()>;
+    async fn terminate_ref(&mut self, _: AntiCallToken) -> io::Result<()>;
 }
 
-impl<W: TerminatingWrite + ?Sized> TerminatingWrite for Box<W> {
-    fn terminate_ref(&mut self, token: AntiCallToken) -> io::Result<()> {
-        self.as_mut().terminate_ref(token)
+#[async_trait]
+impl<W: TerminatingWrite + ?Sized + Unpin> TerminatingWrite for Box<W> {
+    async fn terminate_ref(&mut self, token: AntiCallToken) -> io::Result<()> {
+        self.as_mut().terminate_ref(token).await
     }
 }
 
-impl<W: TerminatingWrite> TerminatingWrite for BufWriter<W> {
-    fn terminate_ref(&mut self, a: AntiCallToken) -> io::Result<()> {
-        self.flush()?;
-        self.get_mut().terminate_ref(a)
+#[async_trait]
+impl<W: TerminatingWrite + Unpin> TerminatingWrite for BufWriter<W> {
+    async fn terminate_ref(&mut self, a: AntiCallToken) -> io::Result<()> {
+        self.flush().await?;
+        self.get_mut().terminate_ref(a).await
     }
 }
 
+#[async_trait]
 impl TerminatingWrite for &mut Vec<u8> {
-    fn terminate_ref(&mut self, _a: AntiCallToken) -> io::Result<()> {
-        self.flush()
+    async fn terminate_ref(&mut self, _a: AntiCallToken) -> io::Result<()> {
+        self.flush().await
     }
 }
 

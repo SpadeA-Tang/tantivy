@@ -189,13 +189,13 @@ impl<'a, T: ?Sized + AsRef<str>> From<&'a T> for Facet {
         Facet::from_text(path_asref).unwrap()
     }
 }
-
+#[async_trait]
 impl BinarySerializable for Facet {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         <String as BinarySerializable>::serialize(&self.0, writer)
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         Ok(Facet(<String as BinarySerializable>::deserialize(reader)?))
     }
 }

@@ -80,13 +80,14 @@ where
         self
     }
 
-    fn delta_reader(&self) -> io::Result<DeltaReader<TSSTable::ValueReader>> {
+    async fn delta_reader(&self) -> io::Result<DeltaReader<TSSTable::ValueReader>> {
         let key_range = (
             bound_as_byte_slice(&self.lower),
             bound_as_byte_slice(&self.upper),
         );
         self.term_dict
             .sstable_delta_reader_for_key_range(key_range, self.limit, &self.automaton)
+            .await
     }
 
     async fn delta_reader_async(
@@ -107,7 +108,7 @@ where
             .await
     }
 
-    fn into_stream_given_delta_reader(
+    async fn into_stream_given_delta_reader(
         self,
         delta_reader: DeltaReader<<TSSTable as SSTable>::ValueReader>,
     ) -> io::Result<Streamer<'a, TSSTable, A>> {
@@ -119,6 +120,7 @@ where
                 .term_dict
                 .sstable_index
                 .get_block_with_key(key)
+                .await
                 .map(|block| block.first_ordinal)
                 .unwrap_or(0),
             Bound::Unbounded => 0,
@@ -148,14 +150,14 @@ where
         merge_holes_under_bytes: usize,
     ) -> io::Result<Streamer<'a, TSSTable, A>> {
         let delta_reader = self.delta_reader_async(merge_holes_under_bytes).await?;
-        self.into_stream_given_delta_reader(delta_reader)
+        self.into_stream_given_delta_reader(delta_reader).await
     }
 
     /// Creates the stream corresponding to the range
     /// of terms defined using the `StreamerBuilder`.
-    pub fn into_stream(self) -> io::Result<Streamer<'a, TSSTable, A>> {
-        let delta_reader = self.delta_reader()?;
-        self.into_stream_given_delta_reader(delta_reader)
+    pub async fn into_stream(self) -> io::Result<Streamer<'a, TSSTable, A>> {
+        let delta_reader = self.delta_reader().await?;
+        self.into_stream_given_delta_reader(delta_reader).await
     }
 }
 
@@ -179,7 +181,8 @@ where
 }
 
 impl<TSSTable> Streamer<'_, TSSTable, AlwaysMatch>
-where TSSTable: SSTable
+where
+    TSSTable: SSTable,
 {
     pub fn empty() -> Self {
         Streamer {

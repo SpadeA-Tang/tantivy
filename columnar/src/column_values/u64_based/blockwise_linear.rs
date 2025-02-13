@@ -2,9 +2,11 @@ use std::io::Write;
 use std::sync::Arc;
 use std::{io, iter};
 
+use async_trait::async_trait;
 use common::{BinarySerializable, CountingWriter, DeserializeFrom, OwnedBytes};
 use fastdivide::DividerU64;
 use tantivy_bitpacker::{compute_num_bits, BitPacker, BitUnpacker};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::column_values::u64_based::line::Line;
 use crate::column_values::u64_based::{ColumnCodec, ColumnCodecEstimator, ColumnStats};
@@ -20,14 +22,15 @@ struct Block {
     data_start_offset: usize,
 }
 
+#[async_trait]
 impl BinarySerializable for Block {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
         self.line.serialize(writer)?;
         self.bit_unpacker.bit_width().serialize(writer)?;
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let line = Line::deserialize(reader)?;
         let bit_width = u8::deserialize(reader)?;
         Ok(Block {
@@ -79,6 +82,7 @@ impl BlockwiseLinearEstimator {
     }
 }
 
+#[async_trait]
 impl ColumnCodecEstimator for BlockwiseLinearEstimator {
     fn collect(&mut self, value: u64) {
         self.block.push(value);
@@ -101,13 +105,13 @@ impl ColumnCodecEstimator for BlockwiseLinearEstimator {
         self.flush_block_estimate();
     }
 
-    fn serialize(
+    async fn serialize(
         &self,
         stats: &ColumnStats,
         mut vals: &mut dyn Iterator<Item = u64>,
-        wrt: &mut dyn Write,
+        wrt: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> io::Result<()> {
-        stats.serialize(wrt)?;
+        stats.serialize(wrt).await?;
         let mut buffer = Vec::with_capacity(BLOCK_SIZE as usize);
         let num_blocks = compute_num_blocks(stats.num_rows) as usize;
         let mut blocks = Vec::with_capacity(num_blocks);
@@ -150,16 +154,16 @@ impl ColumnCodecEstimator for BlockwiseLinearEstimator {
             });
         }
 
-        bit_packer.close(wrt)?;
+        bit_packer.close(wrt).await?;
 
         assert_eq!(blocks.len(), num_blocks);
 
         let mut counting_wrt = CountingWriter::wrap(wrt);
         for block in &blocks {
-            block.serialize(&mut counting_wrt)?;
+            block.serialize(&mut counting_wrt).await?;
         }
         let footer_len = counting_wrt.written_bytes();
-        (footer_len as u32).serialize(&mut counting_wrt)?;
+        (footer_len as u32).serialize(&mut counting_wrt).await?;
 
         Ok(())
     }

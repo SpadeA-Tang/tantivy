@@ -121,10 +121,10 @@ impl ColumnarReader {
         self.num_rows
     }
     // Iterate over the columns in a sorted way
-    pub fn iter_columns(
+    pub async fn iter_columns(
         &self,
     ) -> io::Result<impl Iterator<Item = (String, DynamicColumnHandle)> + '_> {
-        let mut stream = self.column_dictionary.stream()?;
+        let mut stream = self.column_dictionary.stream().await?;
         Ok(std::iter::from_fn(move || {
             if stream.advance() {
                 let key_bytes: &[u8] = stream.key();

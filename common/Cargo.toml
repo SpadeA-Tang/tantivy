@@ -17,7 +17,9 @@ ownedbytes = { version= "0.7", path="../ownedbytes" }
 async-trait = "0.1"
 time = { version = "0.3.10", features = ["serde-well-known"] }
 serde = { version = "1.0.136", features = ["derive"] }
-tokio = { version = "1.29.1", features = ["rt-multi-thread"] }
+tokio = { version = "1.29.1", features = ["full"] }
+tokio-util = { version = "0.6", features = ["io"] }
+futures = "0.3.21"
 
 [dev-dependencies]
 binggan = "0.14.0"

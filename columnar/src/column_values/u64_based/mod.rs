@@ -4,11 +4,11 @@ mod line;
 mod linear;
 mod stats_collector;
 
-use std::io;
-use std::io::Write;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common::{BinarySerializable, OwnedBytes};
+use tokio::io::{self, AsyncWrite};
 
 use crate::column_values::monotonic_mapping::{
     StrictlyMonotonicMappingInverter, StrictlyMonotonicMappingToInternal,
@@ -32,6 +32,7 @@ use crate::{ColumnValues, MonotonicallyMappableToU64};
 /// `.estimate(..)` then should return an accurate estimation of the
 /// size of the serialized column (were we to pick this codec.).
 /// `.serialize(..)` then serializes the column using this codec.
+#[async_trait]
 pub trait ColumnCodecEstimator<T = u64>: 'static {
     /// Records a new value for estimation.
     /// This method will be called for each element of the column during
@@ -44,11 +45,11 @@ pub trait ColumnCodecEstimator<T = u64>: 'static {
     fn estimate(&self, stats: &ColumnStats) -> Option<u64>;
     /// Serializes the column using the given codec.
     /// This constitutes a second pass over the columns values.
-    fn serialize(
+    async fn serialize(
         &self,
         stats: &ColumnStats,
         vals: &mut dyn Iterator<Item = T>,
-        wrt: &mut dyn io::Write,
+        wrt: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> io::Result<()>;
 }
 
@@ -144,10 +145,10 @@ impl CodecType {
 }
 
 /// Serializes a given column of u64-mapped values.
-pub fn serialize_u64_based_column_values<T: MonotonicallyMappableToU64>(
+pub async fn serialize_u64_based_column_values<T: MonotonicallyMappableToU64>(
     vals: &dyn Iterable<T>,
     codec_types: &[CodecType],
-    wrt: &mut dyn Write,
+    wrt: &mut (dyn AsyncWrite + Unpin + Send),
 ) -> io::Result<()> {
     let mut stats_collector = StatsCollector::default();
     let mut estimators: Vec<(CodecType, Box<dyn ColumnCodecEstimator>)> =
@@ -176,12 +177,14 @@ pub fn serialize_u64_based_column_values<T: MonotonicallyMappableToU64>(
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "No available applicable codec.")
         })?;
-    best_codec.to_code().serialize(wrt)?;
-    best_codec_estimator.serialize(
-        &stats,
-        &mut vals.boxed_iter().map(MonotonicallyMappableToU64::to_u64),
-        wrt,
-    )?;
+    best_codec.to_code().serialize(wrt).await?;
+    best_codec_estimator
+        .serialize(
+            &stats,
+            &mut vals.boxed_iter().map(MonotonicallyMappableToU64::to_u64),
+            wrt,
+        )
+        .await?;
     Ok(())
 }
 

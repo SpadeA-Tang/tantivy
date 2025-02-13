@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
-use std::io;
+use tokio::io;
 
 use super::{SingleValueMerger, ValueMerger};
 use crate::{Reader, SSTable, Writer};
@@ -26,7 +26,11 @@ impl<B: AsRef<[u8]>> PartialEq for HeapItem<B> {
     }
 }
 
-pub fn merge_sstable<SST: SSTable, W: io::Write, M: ValueMerger<SST::Value>>(
+pub async fn merge_sstable<
+    SST: SSTable,
+    W: io::AsyncWrite + Unpin + Send,
+    M: ValueMerger<SST::Value> + Send,
+>(
     readers: Vec<Reader<SST::ValueReader>>,
     mut writer: Writer<W, SST::ValueWriter>,
     mut merger: M,
@@ -63,9 +67,9 @@ pub fn merge_sstable<SST: SSTable, W: io::Write, M: ValueMerger<SST::Value>>(
             break;
         }
         let value = value_merger.finish();
-        writer.insert_value(&value)?;
-        writer.flush_block_if_required()?;
+        writer.insert_value(&value).await?;
+        writer.flush_block_if_required().await?;
     }
-    writer.finish()?;
+    writer.finish().await?;
     Ok(())
 }

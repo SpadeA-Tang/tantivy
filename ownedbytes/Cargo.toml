@@ -13,3 +13,4 @@ repository = "https://github.com/quickwit-oss/tantivy"
 
 [dependencies]
 stable_deref_trait = "1.2.0"
+tokio = { version = "1.29.1", features = ["full"] }

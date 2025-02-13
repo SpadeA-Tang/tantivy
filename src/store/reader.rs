@@ -39,13 +39,13 @@ impl Display for DocStoreVersion {
             DocStoreVersion::V2 => write!(f, "V2"),
         }
     }
-}
+}#[async_trait]
 impl BinarySerializable for DocStoreVersion {
     fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
         (*self as u32).serialize(writer)
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         Ok(match u32::deserialize(reader)? {
             1 => DocStoreVersion::V1,
             2 => DocStoreVersion::V2,

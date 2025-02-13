@@ -1,9 +1,10 @@
 use std::fmt;
-use std::io::{Read, Write};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, PrimitiveDateTime, UtcOffset};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::BinarySerializable;
 
@@ -163,14 +164,18 @@ impl fmt::Debug for DateTime {
     }
 }
 
+#[async_trait]
 impl BinarySerializable for DateTime {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> tokio::io::Result<()> {
         let timestamp_micros = self.into_timestamp_micros();
-        <i64 as BinarySerializable>::serialize(&timestamp_micros, writer)
+        <i64 as BinarySerializable>::serialize(&timestamp_micros, writer).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let timestamp_micros = <i64 as BinarySerializable>::deserialize(reader)?;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> tokio::io::Result<Self> {
+        let timestamp_micros = <i64 as BinarySerializable>::deserialize(reader).await?;
         Ok(Self::from_timestamp_micros(timestamp_micros))
     }
 }

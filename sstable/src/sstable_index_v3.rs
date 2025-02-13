@@ -1,11 +1,12 @@
-use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common::{BinarySerializable, FixedSize, OwnedBytes};
 use tantivy_bitpacker::{compute_num_bits, BitPacker};
 use tantivy_fst::raw::Fst;
 use tantivy_fst::{Automaton, IntoStreamer, Map, MapBuilder, Streamer};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::block_match_automaton::can_block_match_automaton;
 use crate::{common_prefix_len, SSTableDataCorruption, TermOrdinal};
@@ -19,10 +20,10 @@ pub enum SSTableIndex {
 
 impl SSTableIndex {
     /// Get the [`BlockAddr`] of the requested block.
-    pub(crate) fn get_block(&self, block_id: u64) -> Option<BlockAddr> {
+    pub(crate) async fn get_block(&self, block_id: u64) -> Option<BlockAddr> {
         match self {
             SSTableIndex::V2(v2_index) => v2_index.get_block(block_id as usize),
-            SSTableIndex::V3(v3_index) => v3_index.get_block(block_id),
+            SSTableIndex::V3(v3_index) => v3_index.get_block(block_id).await,
             SSTableIndex::V3Empty(v3_empty) => v3_empty.get_block(block_id),
         }
     }
@@ -41,27 +42,27 @@ impl SSTableIndex {
     /// Get the [`BlockAddr`] of the block that would contain `key`.
     ///
     /// Returns None if `key` is lexicographically after the last key recorded.
-    pub fn get_block_with_key(&self, key: &[u8]) -> Option<BlockAddr> {
+    pub async fn get_block_with_key(&self, key: &[u8]) -> Option<BlockAddr> {
         match self {
             SSTableIndex::V2(v2_index) => v2_index.get_block_with_key(key),
-            SSTableIndex::V3(v3_index) => v3_index.get_block_with_key(key),
+            SSTableIndex::V3(v3_index) => v3_index.get_block_with_key(key).await,
             SSTableIndex::V3Empty(v3_empty) => v3_empty.get_block_with_key(key),
         }
     }
 
-    pub(crate) fn locate_with_ord(&self, ord: TermOrdinal) -> u64 {
+    pub(crate) async fn locate_with_ord(&self, ord: TermOrdinal) -> u64 {
         match self {
             SSTableIndex::V2(v2_index) => v2_index.locate_with_ord(ord) as u64,
-            SSTableIndex::V3(v3_index) => v3_index.locate_with_ord(ord),
+            SSTableIndex::V3(v3_index) => v3_index.locate_with_ord(ord).await,
             SSTableIndex::V3Empty(v3_empty) => v3_empty.locate_with_ord(ord),
         }
     }
 
     /// Get the [`BlockAddr`] of the block containing the `ord`-th term.
-    pub(crate) fn get_block_with_ord(&self, ord: TermOrdinal) -> BlockAddr {
+    pub(crate) async fn get_block_with_ord(&self, ord: TermOrdinal) -> BlockAddr {
         match self {
             SSTableIndex::V2(v2_index) => v2_index.get_block_with_ord(ord),
-            SSTableIndex::V3(v3_index) => v3_index.get_block_with_ord(ord),
+            SSTableIndex::V3(v3_index) => v3_index.get_block_with_ord(ord).await,
             SSTableIndex::V3Empty(v3_empty) => v3_empty.get_block_with_ord(ord),
         }
     }
@@ -110,7 +111,7 @@ pub struct SSTableIndexV3 {
 
 impl SSTableIndexV3 {
     /// Load an index from its binary representation
-    pub fn load(
+    pub async fn load(
         data: OwnedBytes,
         fst_length: u64,
     ) -> Result<SSTableIndexV3, SSTableDataCorruption> {
@@ -118,8 +119,9 @@ impl SSTableIndexV3 {
         let fst_index = Fst::new(fst_slice)
             .map_err(|_| SSTableDataCorruption)?
             .into();
-        let block_addr_store =
-            BlockAddrStore::open(block_addr_store_slice).map_err(|_| SSTableDataCorruption)?;
+        let block_addr_store = BlockAddrStore::open(block_addr_store_slice)
+            .await
+            .map_err(|_| SSTableDataCorruption)?;
 
         Ok(SSTableIndexV3 {
             fst_index: Arc::new(fst_index),
@@ -128,8 +130,8 @@ impl SSTableIndexV3 {
     }
 
     /// Get the [`BlockAddr`] of the requested block.
-    pub(crate) fn get_block(&self, block_id: u64) -> Option<BlockAddr> {
-        self.block_addr_store.get(block_id)
+    pub(crate) async fn get_block(&self, block_id: u64) -> Option<BlockAddr> {
+        self.block_addr_store.get(block_id).await
     }
 
     /// Get the block id of the block that would contain `key`.
@@ -147,17 +149,20 @@ impl SSTableIndexV3 {
     /// Get the [`BlockAddr`] of the block that would contain `key`.
     ///
     /// Returns None if `key` is lexicographically after the last key recorded.
-    pub fn get_block_with_key(&self, key: &[u8]) -> Option<BlockAddr> {
-        self.locate_with_key(key).and_then(|id| self.get_block(id))
+    pub async fn get_block_with_key(&self, key: &[u8]) -> Option<BlockAddr> {
+        if let Some(id) = self.locate_with_key(key) {
+            return self.get_block(id).await;
+        }
+        None
     }
 
-    pub(crate) fn locate_with_ord(&self, ord: TermOrdinal) -> u64 {
-        self.block_addr_store.binary_search_ord(ord).0
+    pub(crate) async fn locate_with_ord(&self, ord: TermOrdinal) -> u64 {
+        self.block_addr_store.binary_search_ord(ord).await.0
     }
 
     /// Get the [`BlockAddr`] of the block containing the `ord`-th term.
-    pub(crate) fn get_block_with_ord(&self, ord: TermOrdinal) -> BlockAddr {
-        self.block_addr_store.binary_search_ord(ord).1
+    pub(crate) async fn get_block_with_ord(&self, ord: TermOrdinal) -> BlockAddr {
+        self.block_addr_store.binary_search_ord(ord).await.1
     }
 
     pub(crate) fn get_block_for_automaton<'a>(
@@ -194,23 +199,24 @@ impl<A: Automaton> Iterator for GetBlockForAutomaton<'_, A> {
     type Item = (u64, BlockAddr);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((new_key, block_id)) = self.streamer.next() {
-            if let Some(prev_key) = self.prev_key.as_mut() {
-                if can_block_match_automaton(Some(prev_key), new_key, self.automaton) {
-                    prev_key.clear();
-                    prev_key.extend_from_slice(new_key);
-                    return Some((block_id, self.block_addr_store.get(block_id).unwrap()));
-                }
-                prev_key.clear();
-                prev_key.extend_from_slice(new_key);
-            } else {
-                self.prev_key = Some(new_key.to_owned());
-                if can_block_match_automaton(None, new_key, self.automaton) {
-                    return Some((block_id, self.block_addr_store.get(block_id).unwrap()));
-                }
-            }
-        }
-        None
+        unimplemented!()
+        // while let Some((new_key, block_id)) = self.streamer.next() {
+        //     if let Some(prev_key) = self.prev_key.as_mut() {
+        //         if can_block_match_automaton(Some(prev_key), new_key, self.automaton) {
+        //             prev_key.clear();
+        //             prev_key.extend_from_slice(new_key);
+        //             return Some((block_id, self.block_addr_store.get(block_id).unwrap()));
+        //         }
+        //         prev_key.clear();
+        //         prev_key.extend_from_slice(new_key);
+        //     } else {
+        //         self.prev_key = Some(new_key.to_owned());
+        //         if can_block_match_automaton(None, new_key, self.automaton) {
+        //             return Some((block_id, self.block_addr_store.get(block_id).unwrap()));
+        //         }
+        //     }
+        // }
+        // None
     }
 }
 
@@ -296,16 +302,20 @@ pub(crate) struct BlockMeta {
     pub block_addr: BlockAddr,
 }
 
+#[async_trait]
 impl BinarySerializable for BlockStartAddr {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + Unpin + ?Sized + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         let start = self.byte_range_start as u64;
-        start.serialize(writer)?;
-        self.first_ordinal.serialize(writer)
+        start.serialize(writer).await?;
+        self.first_ordinal.serialize(writer).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let byte_range_start = u64::deserialize(reader)? as usize;
-        let first_ordinal = u64::deserialize(reader)?;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        let byte_range_start = u64::deserialize(reader).await? as usize;
+        let first_ordinal = u64::deserialize(reader).await?;
         Ok(BlockStartAddr {
             first_ordinal,
             byte_range_start,
@@ -313,7 +323,7 @@ impl BinarySerializable for BlockStartAddr {
     }
 
     // Provided method
-    fn num_bytes(&self) -> u64 {
+    async fn num_bytes(&self) -> u64 {
         BlockStartAddr::SIZE_IN_BYTES as u64
     }
 }
@@ -367,28 +377,29 @@ impl SSTableIndexBuilder {
         })
     }
 
-    pub fn serialize<W: std::io::Write>(&self, wrt: W) -> io::Result<u64> {
-        if self.blocks.len() <= 1 {
-            return Ok(0);
-        }
-        let counting_writer = common::CountingWriter::wrap(wrt);
-        let mut map_builder = MapBuilder::new(counting_writer).map_err(fst_error_to_io_error)?;
-        for (i, block) in self.blocks.iter().enumerate() {
-            map_builder
-                .insert(&block.last_key_or_greater, i as u64)
-                .map_err(fst_error_to_io_error)?;
-        }
-        let counting_writer = map_builder.into_inner().map_err(fst_error_to_io_error)?;
-        let written_bytes = counting_writer.written_bytes();
-        let mut wrt = counting_writer.finish();
+    pub async fn serialize<W: io::AsyncWrite>(&self, wrt: W) -> io::Result<u64> {
+        unimplemented!();
+        // if self.blocks.len() <= 1 {
+        //     return Ok(0);
+        // }
+        // let counting_writer = common::CountingWriter::wrap(wrt);
+        // let mut map_builder = MapBuilder::new(counting_writer).map_err(fst_error_to_io_error)?;
+        // for (i, block) in self.blocks.iter().enumerate() {
+        //     map_builder
+        //         .insert(&block.last_key_or_greater, i as u64)
+        //         .map_err(fst_error_to_io_error)?;
+        // }
+        // let counting_writer = map_builder.into_inner().map_err(fst_error_to_io_error)?;
+        // let written_bytes = counting_writer.written_bytes();
+        // let mut wrt = counting_writer.finish();
 
-        let mut block_store_writer = BlockAddrStoreWriter::new();
-        for block in &self.blocks {
-            block_store_writer.write_block_meta(block.block_addr.clone())?;
-        }
-        block_store_writer.serialize(&mut wrt)?;
+        // let mut block_store_writer = BlockAddrStoreWriter::new();
+        // for block in &self.blocks {
+        //     block_store_writer.write_block_meta(block.block_addr.clone())?;
+        // }
+        // block_store_writer.serialize(&mut wrt)?;
 
-        Ok(written_bytes)
+        // Ok(written_bytes)
     }
 }
 
@@ -513,28 +524,34 @@ fn extract_bits(data: &[u8], addr_bits: usize, num_bits: u8) -> u64 {
     val_shifted_unmasked & mask
 }
 
+#[async_trait]
 impl BinarySerializable for BlockAddrBlockMetadata {
-    fn serialize<W: Write + ?Sized>(&self, write: &mut W) -> io::Result<()> {
-        self.offset.serialize(write)?;
-        self.ref_block_addr.serialize(write)?;
-        self.range_start_slope.serialize(write)?;
-        self.first_ordinal_slope.serialize(write)?;
-        write.write_all(&[self.first_ordinal_nbits, self.range_start_nbits])?;
-        self.block_len.serialize(write)?;
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        write: &mut W,
+    ) -> io::Result<()> {
+        self.offset.serialize(write).await?;
+        self.ref_block_addr.serialize(write).await?;
+        self.range_start_slope.serialize(write).await?;
+        self.first_ordinal_slope.serialize(write).await?;
+        write
+            .write_all(&[self.first_ordinal_nbits, self.range_start_nbits])
+            .await?;
+        self.block_len.serialize(write).await?;
         self.num_bits();
         Ok(())
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let offset = u64::deserialize(reader)?;
-        let ref_block_addr = BlockStartAddr::deserialize(reader)?;
-        let range_start_slope = u32::deserialize(reader)?;
-        let first_ordinal_slope = u32::deserialize(reader)?;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        let offset = u64::deserialize(reader).await?;
+        let ref_block_addr = BlockStartAddr::deserialize(reader).await?;
+        let range_start_slope = u32::deserialize(reader).await?;
+        let first_ordinal_slope = u32::deserialize(reader).await?;
         let mut buffer = [0u8; 2];
-        reader.read_exact(&mut buffer)?;
+        reader.read_exact(&mut buffer).await?;
         let first_ordinal_nbits = buffer[0];
         let range_start_nbits = buffer[1];
-        let block_len = u16::deserialize(reader)?;
+        let block_len = u16::deserialize(reader).await?;
         Ok(BlockAddrBlockMetadata {
             offset,
             ref_block_addr,
@@ -564,9 +581,9 @@ struct BlockAddrStore {
 }
 
 impl BlockAddrStore {
-    fn open(term_info_store_file: OwnedBytes) -> io::Result<BlockAddrStore> {
+    async fn open(term_info_store_file: OwnedBytes) -> io::Result<BlockAddrStore> {
         let (mut len_slice, main_slice) = term_info_store_file.split(8);
-        let len = u64::deserialize(&mut len_slice)? as usize;
+        let len = u64::deserialize(&mut len_slice).await? as usize;
         let (block_meta_bytes, addr_bytes) = main_slice.split(len);
         Ok(BlockAddrStore {
             block_meta_bytes,
@@ -574,45 +591,40 @@ impl BlockAddrStore {
         })
     }
 
-    fn get_block_meta(&self, store_block_id: usize) -> Option<BlockAddrBlockMetadata> {
+    async fn get_block_meta(&self, store_block_id: usize) -> Option<BlockAddrBlockMetadata> {
         let mut block_data: &[u8] = self
             .block_meta_bytes
             .get(store_block_id * BlockAddrBlockMetadata::SIZE_IN_BYTES..)?;
-        BlockAddrBlockMetadata::deserialize(&mut block_data).ok()
+        BlockAddrBlockMetadata::deserialize(&mut block_data)
+            .await
+            .ok()
     }
 
-    fn get(&self, block_id: u64) -> Option<BlockAddr> {
+    async fn get(&self, block_id: u64) -> Option<BlockAddr> {
         let store_block_id = (block_id as usize) / STORE_BLOCK_LEN;
         let inner_offset = (block_id as usize) % STORE_BLOCK_LEN;
-        let block_addr_block_data = self.get_block_meta(store_block_id)?;
+        let block_addr_block_data = self.get_block_meta(store_block_id).await?;
         block_addr_block_data.deserialize_block_addr(
             &self.addr_bytes[block_addr_block_data.offset as usize..],
             inner_offset,
         )
     }
 
-    fn binary_search_ord(&self, ord: TermOrdinal) -> (u64, BlockAddr) {
+    async fn binary_search_ord(&self, ord: TermOrdinal) -> (u64, BlockAddr) {
         let max_block =
             (self.block_meta_bytes.len() / BlockAddrBlockMetadata::SIZE_IN_BYTES) as u64;
-        let get_first_ordinal = |block_id| {
-            // we can unwrap because block_id < max_block
-            self.get(block_id * STORE_BLOCK_LEN as u64)
-                .unwrap()
-                .first_ordinal
-        };
-        let store_block_id =
-            binary_search(max_block, |block_id| get_first_ordinal(block_id).cmp(&ord));
+        let store_block_id = self.binary_search(max_block, &ord).await;
         let store_block_id = match store_block_id {
             Ok(store_block_id) => {
                 let block_id = store_block_id * STORE_BLOCK_LEN as u64;
                 // we can unwrap because store_block_id < max_block
-                return (block_id, self.get(block_id).unwrap());
+                return (block_id, self.get(block_id).await.unwrap());
             }
             Err(store_block_id) => store_block_id - 1,
         };
 
         // we can unwrap because store_block_id < max_block
-        let block_addr_block_data = self.get_block_meta(store_block_id as usize).unwrap();
+        let block_addr_block_data = self.get_block_meta(store_block_id as usize).await.unwrap();
         let (inner_offset, block_addr) = block_addr_block_data.bisect_for_ord(
             &self.addr_bytes[block_addr_block_data.offset as usize..],
             ord,
@@ -621,6 +633,35 @@ impl BlockAddrStore {
             store_block_id * STORE_BLOCK_LEN as u64 + inner_offset,
             block_addr,
         )
+    }
+
+    async fn binary_search(&self, max: u64, ord: &TermOrdinal) -> Result<u64, u64> {
+        use std::cmp::Ordering::*;
+        let mut size = max;
+        let mut left = 0;
+        let mut right = size;
+        while left < right {
+            let mid = left + size / 2;
+
+            // we can unwrap because block_id < max_block
+            let cmp = self
+                .get(mid * STORE_BLOCK_LEN as u64)
+                .await
+                .unwrap()
+                .first_ordinal
+                .cmp(ord);
+
+            if cmp == Less {
+                left = mid + 1;
+            } else if cmp == Greater {
+                right = mid;
+            } else {
+                return Ok(mid);
+            }
+
+            size = right - left;
+        }
+        Err(left)
     }
 }
 
@@ -662,7 +703,7 @@ impl BlockAddrStoreWriter {
         }
     }
 
-    fn flush_block(&mut self) -> io::Result<()> {
+    async fn flush_block(&mut self) -> io::Result<()> {
         if self.block_addrs.is_empty() {
             return Ok(());
         }
@@ -710,51 +751,59 @@ impl BlockAddrStoreWriter {
             range_shift,
             ordinal_shift,
         };
-        block_addr_block_meta.serialize(&mut self.buffer_block_metas)?;
+        block_addr_block_meta
+            .serialize(&mut self.buffer_block_metas)
+            .await?;
 
         let mut bit_packer = BitPacker::new();
 
         for (i, block_addr) in self.block_addrs.iter().enumerate().skip(1) {
             let range_pred = (range_start_slope as usize * i) as i64;
-            bit_packer.write(
-                (block_addr.byte_range.start as i64 - range_pred + range_shift) as u64,
-                range_start_nbits,
-                &mut self.buffer_addrs,
-            )?;
+            bit_packer
+                .write(
+                    (block_addr.byte_range.start as i64 - range_pred + range_shift) as u64,
+                    range_start_nbits,
+                    &mut self.buffer_addrs,
+                )
+                .await?;
             let first_ordinal_pred = (first_ordinal_slope as u64 * i as u64) as i64;
-            bit_packer.write(
-                (block_addr.first_ordinal as i64 - first_ordinal_pred + ordinal_shift) as u64,
-                first_ordinal_nbits,
-                &mut self.buffer_addrs,
-            )?;
+            bit_packer
+                .write(
+                    (block_addr.first_ordinal as i64 - first_ordinal_pred + ordinal_shift) as u64,
+                    first_ordinal_nbits,
+                    &mut self.buffer_addrs,
+                )
+                .await?;
         }
 
         let range_pred = (range_start_slope as usize * self.block_addrs.len()) as i64;
-        bit_packer.write(
-            (last_block_addr.byte_range.end as i64 - range_pred + range_shift) as u64,
-            range_start_nbits,
-            &mut self.buffer_addrs,
-        )?;
-        bit_packer.flush(&mut self.buffer_addrs)?;
+        bit_packer
+            .write(
+                (last_block_addr.byte_range.end as i64 - range_pred + range_shift) as u64,
+                range_start_nbits,
+                &mut self.buffer_addrs,
+            )
+            .await?;
+        bit_packer.flush(&mut self.buffer_addrs).await?;
 
         self.block_addrs.clear();
         Ok(())
     }
 
-    fn write_block_meta(&mut self, block_addr: BlockAddr) -> io::Result<()> {
+    async fn write_block_meta(&mut self, block_addr: BlockAddr) -> io::Result<()> {
         self.block_addrs.push(block_addr);
         if self.block_addrs.len() >= STORE_BLOCK_LEN {
-            self.flush_block()?;
+            self.flush_block().await?;
         }
         Ok(())
     }
 
-    fn serialize<W: std::io::Write>(&mut self, wrt: &mut W) -> io::Result<()> {
-        self.flush_block()?;
+    async fn serialize<W: io::AsyncWrite + Unpin + Send>(&mut self, wrt: &mut W) -> io::Result<()> {
+        self.flush_block().await?;
         let len = self.buffer_block_metas.len() as u64;
-        len.serialize(wrt)?;
-        wrt.write_all(&self.buffer_block_metas)?;
-        wrt.write_all(&self.buffer_addrs)?;
+        len.serialize(wrt).await?;
+        wrt.write_all(&self.buffer_block_metas).await?;
+        wrt.write_all(&self.buffer_addrs).await?;
         Ok(())
     }
 }

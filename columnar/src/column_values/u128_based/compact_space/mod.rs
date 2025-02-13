@@ -13,16 +13,17 @@
 use std::{
     cmp::Ordering,
     collections::BTreeSet,
-    io::{self, Write},
     ops::{Range, RangeInclusive},
 };
 
 mod blank_range;
 mod build_compact_space;
 
+use async_trait::async_trait;
 use build_compact_space::get_compact_space;
 use common::{BinarySerializable, CountingWriter, OwnedBytes, VInt, VIntU128};
 use tantivy_bitpacker::{BitPacker, BitUnpacker};
+use tokio::io::{self, AsyncRead, AsyncWrite};
 
 use crate::column_values::ColumnValues;
 use crate::RowId;
@@ -55,8 +56,12 @@ impl RangeMapping {
     }
 }
 
+#[async_trait]
 impl BinarySerializable for CompactSpace {
-    fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         VInt(self.ranges_mapping.len() as u64).serialize(writer)?;
 
         let mut prev_value = 0;
@@ -77,7 +82,7 @@ impl BinarySerializable for CompactSpace {
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let num_ranges = VInt::deserialize(reader)?.0;
         let mut ranges_mapping: Vec<RangeMapping> = vec![];
         let mut value = 0u128;
@@ -216,20 +221,20 @@ impl CompactSpaceCompressor {
         }
     }
 
-    fn write_footer(self, writer: &mut impl Write) -> io::Result<()> {
+    async fn write_footer(self, writer: &mut (impl AsyncWrite + Unpin + Send)) -> io::Result<()> {
         let writer = &mut CountingWriter::wrap(writer);
-        self.params.serialize(writer)?;
+        self.params.serialize(writer).await?;
 
         let footer_len = writer.written_bytes() as u32;
-        footer_len.serialize(writer)?;
+        footer_len.serialize(writer).await?;
 
         Ok(())
     }
 
-    pub fn compress_into(
+    pub async fn compress_into(
         self,
         vals: impl Iterator<Item = u128>,
-        write: &mut impl Write,
+        write: &mut (impl AsyncWrite + Unpin + Send),
     ) -> io::Result<()> {
         let mut bitpacker = BitPacker::default();
         for val in vals {
@@ -243,10 +248,12 @@ impl CompactSpaceCompressor {
                         "Could not convert value to compact_space. This is a bug.",
                     )
                 })?;
-            bitpacker.write(compact as u64, self.params.num_bits, write)?;
+            bitpacker
+                .write(compact as u64, self.params.num_bits, write)
+                .await?;
         }
-        bitpacker.close(write)?;
-        self.write_footer(write)?;
+        bitpacker.close(write).await?;
+        self.write_footer(write).await?;
         Ok(())
     }
 }
@@ -257,29 +264,33 @@ pub struct CompactSpaceDecompressor {
     params: IPCodecParams,
 }
 
+#[async_trait]
 impl BinarySerializable for IPCodecParams {
-    fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         // header flags for future optional dictionary encoding
         let footer_flags = 0u64;
         footer_flags.serialize(writer)?;
 
-        VIntU128(self.min_value).serialize(writer)?;
-        VIntU128(self.max_value).serialize(writer)?;
-        VIntU128(self.num_vals as u128).serialize(writer)?;
-        self.num_bits.serialize(writer)?;
+        VIntU128(self.min_value).serialize(writer).await?;
+        VIntU128(self.max_value).serialize(writer).await?;
+        VIntU128(self.num_vals as u128).serialize(writer).await?;
+        self.num_bits.serialize(writer).await?;
 
-        self.compact_space.serialize(writer)?;
+        self.compact_space.serialize(writer).await?;
 
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
-        let _header_flags = u64::deserialize(reader)?;
-        let min_value = VIntU128::deserialize(reader)?.0;
-        let max_value = VIntU128::deserialize(reader)?.0;
-        let num_vals = VIntU128::deserialize(reader)?.0 as u32;
-        let num_bits = u8::deserialize(reader)?;
-        let compact_space = CompactSpace::deserialize(reader)?;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        let _header_flags = u64::deserialize(reader).await?;
+        let min_value = VIntU128::deserialize(reader).await?.0;
+        let max_value = VIntU128::deserialize(reader).await?.0;
+        let num_vals = VIntU128::deserialize(reader).await?.0 as u32;
+        let num_bits = u8::deserialize(reader).await?;
+        let compact_space = CompactSpace::deserialize(reader).await?;
 
         Ok(Self {
             compact_space,
@@ -419,12 +430,12 @@ impl ColumnValues<u128> for CompactSpaceDecompressor {
 }
 
 impl CompactSpaceDecompressor {
-    pub fn open(data: OwnedBytes) -> io::Result<CompactSpaceDecompressor> {
+    pub async fn open(data: OwnedBytes) -> io::Result<CompactSpaceDecompressor> {
         let (data_slice, footer_len_bytes) = data.split_at(data.len() - 4);
-        let footer_len = u32::deserialize(&mut &footer_len_bytes[..])?;
+        let footer_len = u32::deserialize(&mut &footer_len_bytes[..]).await?;
 
         let data_footer = &data_slice[data_slice.len() - footer_len as usize..];
-        let params = IPCodecParams::deserialize(&mut &data_footer[..])?;
+        let params = IPCodecParams::deserialize(&mut &data_footer[..]).await?;
         let decompressor = CompactSpaceDecompressor { data, params };
 
         Ok(decompressor)

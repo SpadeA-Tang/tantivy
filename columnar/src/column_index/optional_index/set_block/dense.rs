@@ -1,6 +1,6 @@
-use std::io::{self, Write};
-
+use async_trait::async_trait;
 use common::BinarySerializable;
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 
 use crate::column_index::optional_index::{SelectCursor, Set, SetCodec, ELEMENTS_PER_BLOCK};
 
@@ -34,12 +34,16 @@ pub const DENSE_BLOCK_NUM_BYTES: u32 =
 
 pub struct DenseBlockCodec;
 
+#[async_trait]
 impl SetCodec for DenseBlockCodec {
     type Item = u16;
     type Reader<'a> = DenseBlock<'a>;
 
-    fn serialize(els: impl Iterator<Item = u16>, wrt: impl io::Write) -> io::Result<()> {
-        serialize_dense_codec(els, wrt)
+    async fn serialize(
+        els: impl Iterator<Item = u16> + Send,
+        wrt: impl AsyncWrite + Unpin + Send,
+    ) -> io::Result<()> {
+        serialize_dense_codec(els, wrt).await
     }
 
     #[inline]
@@ -124,7 +128,8 @@ impl SelectCursor<u16> for DenseBlockSelectCursor<'_> {
 impl<'a> Set<u16> for DenseBlock<'a> {
     type SelectCursor<'b>
         = DenseBlockSelectCursor<'a>
-    where Self: 'b;
+    where
+        Self: 'b;
 
     #[inline(always)]
     fn contains(&self, el: u16) -> bool {
@@ -216,9 +221,9 @@ impl DenseBlock<'_> {
 }
 
 /// Iterator over all values, true if set, otherwise false
-pub fn serialize_dense_codec(
+pub async fn serialize_dense_codec(
     els: impl Iterator<Item = u16>,
-    mut output: impl Write,
+    mut output: impl AsyncWrite + Unpin + Send,
 ) -> io::Result<()> {
     let mut non_null_rows_before: u16 = 0u16;
     let mut block = 0u64;
@@ -231,7 +236,7 @@ pub fn serialize_dense_codec(
                 bitvec: block,
                 rank: non_null_rows_before,
             };
-            output.write_all(&dense_mini_block.to_bytes())?;
+            output.write_all(&dense_mini_block.to_bytes()).await?;
             non_null_rows_before += block.count_ones() as u16;
             block = 0u64;
             current_block_id += 1u16;
@@ -239,8 +244,8 @@ pub fn serialize_dense_codec(
         set_bit_at(&mut block, in_offset);
     }
     while current_block_id <= u16::MAX / ELEMENTS_PER_MINI_BLOCK {
-        block.serialize(&mut output)?;
-        non_null_rows_before.serialize(&mut output)?;
+        block.serialize(&mut output).await?;
+        non_null_rows_before.serialize(&mut output).await?;
         // This will overflow to 0 exactly if all bits are set.
         // This is however not problem as we won't use this last value.
         non_null_rows_before = non_null_rows_before.wrapping_add(block.count_ones() as u16);

@@ -8,7 +8,7 @@ pub trait SingleValueMerger<V> {
 }
 
 pub trait ValueMerger<V> {
-    type TSingleValueMerger: SingleValueMerger<V>;
+    type TSingleValueMerger: SingleValueMerger<V> + Send;
     fn new_value(&mut self, v: &V) -> Self::TSingleValueMerger;
 }
 
@@ -17,7 +17,7 @@ pub struct KeepFirst;
 
 pub struct FirstVal<V>(V);
 
-impl<V: Clone> ValueMerger<V> for KeepFirst {
+impl<V: Clone + Send> ValueMerger<V> for KeepFirst {
     type TSingleValueMerger = FirstVal<V>;
 
     fn new_value(&mut self, v: &V) -> FirstVal<V> {

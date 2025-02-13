@@ -15,7 +15,7 @@ pub struct DocStoreFooter {
 /// Serialises the footer to a byte-array
 /// - offset : 8 bytes
 /// - compressor id: 1 byte
-/// - reserved for future use: 15 bytes
+/// - reserved for future use: 15 bytes#[async_trait]
 impl BinarySerializable for DocStoreFooter {
     fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
         BinarySerializable::serialize(&DOC_STORE_VERSION, writer)?;
@@ -25,7 +25,7 @@ impl BinarySerializable for DocStoreFooter {
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let doc_store_version = DocStoreVersion::deserialize(reader)?;
         if doc_store_version > DOC_STORE_VERSION {
             panic!(

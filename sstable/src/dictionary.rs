@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::io;
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
@@ -11,6 +10,7 @@ use futures_util::{stream, StreamExt, TryStreamExt};
 use itertools::Itertools;
 use tantivy_fst::automaton::AlwaysMatch;
 use tantivy_fst::Automaton;
+use tokio::io;
 
 use crate::sstable_index_v3::SSTableIndexV3Empty;
 use crate::streamer::{Streamer, StreamerBuilder};
@@ -46,16 +46,18 @@ pub struct Dictionary<TSSTable: SSTable = VoidSSTable> {
 }
 
 impl Dictionary<VoidSSTable> {
-    pub fn build_for_tests(terms: &[&str]) -> Dictionary {
+    pub async fn build_for_tests(terms: &[&str]) -> Dictionary {
         let mut terms = terms.to_vec();
         terms.sort();
         let mut buffer = Vec::new();
         let mut dictionary_writer = Self::builder(&mut buffer).unwrap();
         for term in terms {
-            dictionary_writer.insert(term, &()).unwrap();
+            dictionary_writer.insert(term, &()).await.unwrap();
         }
-        dictionary_writer.finish().unwrap();
-        Dictionary::from_bytes(OwnedBytes::new(buffer)).unwrap()
+        dictionary_writer.finish().await.unwrap();
+        Dictionary::from_bytes(OwnedBytes::new(buffer))
+            .await
+            .unwrap()
     }
 }
 
@@ -84,7 +86,9 @@ impl TermOrdHit {
 }
 
 impl<TSSTable: SSTable> Dictionary<TSSTable> {
-    pub fn builder<W: io::Write>(wrt: W) -> io::Result<crate::Writer<W, TSSTable::ValueWriter>> {
+    pub fn builder<W: io::AsyncWrite + Unpin + Send>(
+        wrt: W,
+    ) -> io::Result<crate::Writer<W, TSSTable::ValueWriter>> {
         Ok(TSSTable::writer(wrt))
     }
 
@@ -105,7 +109,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     ) -> io::Result<DeltaReader<TSSTable::ValueReader>> {
         let match_all = automaton.will_always_match(&automaton.start());
         if match_all {
-            let slice = self.file_slice_for_range(key_range, limit);
+            let slice = self.file_slice_for_range(key_range, limit).await;
             let data = slice.read_bytes_async().await?;
             Ok(TSSTable::delta_reader(data))
         } else {
@@ -126,7 +130,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
         }
     }
 
-    pub(crate) fn sstable_delta_reader_for_key_range(
+    pub(crate) async fn sstable_delta_reader_for_key_range(
         &self,
         key_range: impl RangeBounds<[u8]>,
         limit: Option<u64>,
@@ -134,7 +138,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     ) -> io::Result<DeltaReader<TSSTable::ValueReader>> {
         let match_all = automaton.will_always_match(&automaton.start());
         if match_all {
-            let slice = self.file_slice_for_range(key_range, limit);
+            let slice = self.file_slice_for_range(key_range, limit).await;
             let data = slice.read_bytes()?;
             Ok(TSSTable::delta_reader(data))
         } else {
@@ -185,7 +189,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     /// On the rare edge case where a user asks for `(start_key, end_key]`
     /// and `start_key` happens to be the last key of a block, we return a
     /// slice that is the first block was not necessary.
-    pub fn file_slice_for_range(
+    pub async fn file_slice_for_range(
         &self,
         key_range: impl RangeBounds<[u8]>,
         limit: Option<u64>,
@@ -206,7 +210,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
         };
 
         let start_bound = if let Some(first_block_id) = first_block_id {
-            let Some(block_addr) = self.sstable_index.get_block(first_block_id) else {
+            let Some(block_addr) = self.sstable_index.get_block(first_block_id).await else {
                 return FileSlice::empty();
             };
             Bound::Included(block_addr.byte_range.start)
@@ -216,9 +220,9 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
 
         let last_block_id = if let Some(limit) = limit {
             let second_block_id = first_block_id.map(|id| id + 1).unwrap_or(0);
-            if let Some(block_addr) = self.sstable_index.get_block(second_block_id) {
+            if let Some(block_addr) = self.sstable_index.get_block(second_block_id).await {
                 let ordinal_limit = block_addr.first_ordinal + limit;
-                let last_block_limit = self.sstable_index.locate_with_ord(ordinal_limit);
+                let last_block_limit = self.sstable_index.locate_with_ord(ordinal_limit).await;
                 if let Some(last_block_id) = last_block_id {
                     Some(last_block_id.min(last_block_limit))
                 } else {
@@ -230,10 +234,16 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
         } else {
             last_block_id
         };
-        let end_bound = last_block_id
-            .and_then(|block_id| self.sstable_index.get_block(block_id))
-            .map(|block_addr| Bound::Excluded(block_addr.byte_range.end))
-            .unwrap_or(Bound::Unbounded);
+
+        let end_bound = if let Some(block_id) = last_block_id {
+            self.sstable_index
+                .get_block(block_id)
+                .await
+                .map(|block_addr| Bound::Excluded(block_addr.byte_range.end))
+                .unwrap_or(Bound::Unbounded)
+        } else {
+            Bound::Unbounded
+        };
 
         self.sstable_slice.slice((start_bound, end_bound))
     }
@@ -275,12 +285,12 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     }
 
     /// Opens a `TermDictionary`.
-    pub fn open(term_dictionary_file: FileSlice) -> io::Result<Self> {
+    pub async fn open(term_dictionary_file: FileSlice) -> io::Result<Self> {
         let (main_slice, footer_len_slice) = term_dictionary_file.split_from_end(20);
         let mut footer_len_bytes: OwnedBytes = footer_len_slice.read_bytes()?;
-        let index_offset = u64::deserialize(&mut footer_len_bytes)?;
-        let num_terms = u64::deserialize(&mut footer_len_bytes)?;
-        let version = u32::deserialize(&mut footer_len_bytes)?;
+        let index_offset = u64::deserialize(&mut footer_len_bytes).await?;
+        let num_terms = u64::deserialize(&mut footer_len_bytes).await?;
+        let version = u32::deserialize(&mut footer_len_bytes).await?;
         let (sstable_slice, index_slice) = main_slice.split(index_offset as usize);
         let sstable_index_bytes = index_slice.read_bytes()?;
 
@@ -292,12 +302,14 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
             ),
             3 => {
                 let (sstable_index_bytes, mut footerv3_len_bytes) = sstable_index_bytes.rsplit(8);
-                let store_offset = u64::deserialize(&mut footerv3_len_bytes)?;
+                let store_offset = u64::deserialize(&mut footerv3_len_bytes).await?;
                 if store_offset != 0 {
                     SSTableIndex::V3(
-                        SSTableIndexV3::load(sstable_index_bytes, store_offset).map_err(|_| {
-                            io::Error::new(io::ErrorKind::InvalidData, "SSTable corruption")
-                        })?,
+                        SSTableIndexV3::load(sstable_index_bytes, store_offset)
+                            .await
+                            .map_err(|_| {
+                                io::Error::new(io::ErrorKind::InvalidData, "SSTable corruption")
+                            })?,
                     )
                 } else {
                     // if store_offset is zero, there is no index, so we build a pseudo-index
@@ -322,18 +334,19 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     }
 
     /// Creates a term dictionary from the supplied bytes.
-    pub fn from_bytes(owned_bytes: OwnedBytes) -> io::Result<Self> {
-        Dictionary::open(FileSlice::new(Arc::new(owned_bytes)))
+    pub async fn from_bytes(owned_bytes: OwnedBytes) -> io::Result<Self> {
+        Dictionary::open(FileSlice::new(Arc::new(owned_bytes))).await
     }
 
     /// Creates an empty term dictionary which contains no terms.
-    pub fn empty() -> Self {
+    pub async fn empty() -> Self {
         let term_dictionary_data: Vec<u8> = Self::builder(Vec::<u8>::new())
             .expect("Creating a TermDictionaryBuilder in a Vec<u8> should never fail")
             .finish()
+            .await
             .expect("Writing in a Vec<u8> should never fail");
         let empty_dict_file = FileSlice::from(term_dictionary_data);
-        Dictionary::open(empty_dict_file).unwrap()
+        Dictionary::open(empty_dict_file).await.unwrap()
     }
 
     /// Returns the number of terms in the dictionary.
@@ -406,10 +419,10 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     }
 
     /// Returns the ordinal associated with a given term.
-    pub fn term_ord<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TermOrdinal>> {
+    pub async fn term_ord<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TermOrdinal>> {
         let key_bytes = key.as_ref();
 
-        let Some(block_addr) = self.sstable_index.get_block_with_key(key_bytes) else {
+        let Some(block_addr) = self.sstable_index.get_block_with_key(key_bytes).await else {
             return Ok(None);
         };
 
@@ -421,10 +434,10 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
 
     /// Returns the ordinal associated with a given term or its closest next term_id
     /// The closest next term_id may not exist.
-    pub fn term_ord_or_next<K: AsRef<[u8]>>(&self, key: K) -> io::Result<TermOrdHit> {
+    pub async fn term_ord_or_next<K: AsRef<[u8]>>(&self, key: K) -> io::Result<TermOrdHit> {
         let key_bytes = key.as_ref();
 
-        let Some(block_addr) = self.sstable_index.get_block_with_key(key_bytes) else {
+        let Some(block_addr) = self.sstable_index.get_block_with_key(key_bytes).await else {
             // TODO: Would be more consistent to return last_term id + 1
             return Ok(TermOrdHit::Next(u64::MAX));
         };
@@ -452,26 +465,54 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     /// upper_bound: Bound::Excluded(ccc) => Excluded(1) // Next term id
     /// upper_bound: Bound::Included(zzz) => Excluded(2) // Next term id + Change the bounds
     /// upper_bound: Bound::Excluded(zzz) => Excluded(2) // Next term id
-    pub fn term_bounds_to_ord<K: AsRef<[u8]>>(
+    pub async fn term_bounds_to_ord<K: AsRef<[u8]>>(
         &self,
         lower_bound: Bound<K>,
         upper_bound: Bound<K>,
     ) -> io::Result<(Bound<TermOrdinal>, Bound<TermOrdinal>)> {
-        let lower_bound = transform_bound_inner_res(&lower_bound, |start_bound_bytes| {
-            let ord = self.term_ord_or_next(start_bound_bytes)?;
-            match ord {
-                TermOrdHit::Exact(ord) => Ok(TransformBound::Existing(ord)),
-                TermOrdHit::Next(ord) => Ok(TransformBound::NewBound(Bound::Included(ord))), /* Change bounds to included */
-            }
-        })?;
-        let upper_bound = transform_bound_inner_res(&upper_bound, |end_bound_bytes| {
-            let ord = self.term_ord_or_next(end_bound_bytes)?;
-            match ord {
-                TermOrdHit::Exact(ord) => Ok(TransformBound::Existing(ord)),
-                TermOrdHit::Next(ord) => Ok(TransformBound::NewBound(Bound::Excluded(ord))), /* Change bounds to excluded */
-            }
-        })?;
+        let lower_bound = self.transform_bound_inner_res(&lower_bound).await?;
+        let upper_bound = self.transform_bound_inner_res(&upper_bound).await?;
         Ok((lower_bound, upper_bound))
+    }
+
+    pub async fn transform_bound_inner_res<K: AsRef<[u8]>>(
+        &self,
+        bound: &Bound<K>,
+    ) -> io::Result<Bound<TermOrdinal>> {
+        use self::Bound::*;
+        Ok(match bound {
+            Excluded(ref from_val) => match self.transform_lower(from_val).await? {
+                TransformBound::NewBound(new_val) => new_val,
+                TransformBound::Existing(new_val) => Excluded(new_val),
+            },
+            Included(ref from_val) => match self.transform_upper(from_val).await? {
+                TransformBound::NewBound(new_val) => new_val,
+                TransformBound::Existing(new_val) => Included(new_val),
+            },
+            Unbounded => Unbounded,
+        })
+    }
+
+    async fn transform_lower<K: AsRef<[u8]>>(
+        &self,
+        start_bound_bytes: &K,
+    ) -> io::Result<TransformBound<TermOrdinal>> {
+        let ord = self.term_ord_or_next(start_bound_bytes).await?;
+        match ord {
+            TermOrdHit::Exact(ord) => Ok(TransformBound::Existing(ord)),
+            TermOrdHit::Next(ord) => Ok(TransformBound::NewBound(Bound::Included(ord))),
+        }
+    }
+
+    async fn transform_upper<K: AsRef<[u8]>>(
+        &self,
+        end_bound_bytes: &K,
+    ) -> io::Result<TransformBound<TermOrdinal>> {
+        let ord = self.term_ord_or_next(end_bound_bytes).await?;
+        match ord {
+            TermOrdHit::Exact(ord) => Ok(TransformBound::Existing(ord)),
+            TermOrdHit::Next(ord) => Ok(TransformBound::NewBound(Bound::Excluded(ord))),
+        }
     }
 
     /// Returns the term associated with a given term ordinal.
@@ -483,9 +524,9 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     ///
     /// Regardless of whether the term is found or not,
     /// the buffer may be modified.
-    pub fn ord_to_term(&self, ord: TermOrdinal, bytes: &mut Vec<u8>) -> io::Result<bool> {
+    pub async fn ord_to_term(&self, ord: TermOrdinal, bytes: &mut Vec<u8>) -> io::Result<bool> {
         // find block in which the term would be
-        let block_addr = self.sstable_index.get_block_with_ord(ord);
+        let block_addr = self.sstable_index.get_block_with_ord(ord).await;
         let first_ordinal = block_addr.first_ordinal;
 
         // then search inside that block only
@@ -503,20 +544,20 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     /// Returns the terms for a _sorted_ list of term ordinals.
     ///
     /// Returns true if and only if all terms have been found.
-    pub fn sorted_ords_to_term_cb<F: FnMut(&[u8]) -> io::Result<()>>(
+    pub async fn sorted_ords_to_term_cb<F: FnMut(&[u8]) -> io::Result<()>>(
         &self,
         ord: impl Iterator<Item = TermOrdinal>,
         mut cb: F,
     ) -> io::Result<bool> {
         let mut bytes = Vec::new();
-        let mut current_block_addr = self.sstable_index.get_block_with_ord(0);
+        let mut current_block_addr = self.sstable_index.get_block_with_ord(0).await;
         let mut current_sstable_delta_reader =
             self.sstable_delta_reader_block(current_block_addr.clone())?;
         let mut current_ordinal = 0;
         for ord in ord {
             assert!(ord >= current_ordinal);
             // check if block changed for new term_ord
-            let new_block_addr = self.sstable_index.get_block_with_ord(ord);
+            let new_block_addr = self.sstable_index.get_block_with_ord(ord).await;
             if new_block_addr != current_block_addr {
                 current_block_addr = new_block_addr;
                 current_ordinal = current_block_addr.first_ordinal;
@@ -540,9 +581,12 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     }
 
     /// Returns the number of terms in the dictionary.
-    pub fn term_info_from_ord(&self, term_ord: TermOrdinal) -> io::Result<Option<TSSTable::Value>> {
+    pub async fn term_info_from_ord(
+        &self,
+        term_ord: TermOrdinal,
+    ) -> io::Result<Option<TSSTable::Value>> {
         // find block in which the term would be
-        let block_addr = self.sstable_index.get_block_with_ord(term_ord);
+        let block_addr = self.sstable_index.get_block_with_ord(term_ord).await;
         let first_ordinal = block_addr.first_ordinal;
 
         // then search inside that block only
@@ -556,8 +600,8 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     }
 
     /// Lookups the value corresponding to the key.
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TSSTable::Value>> {
-        if let Some(block_addr) = self.sstable_index.get_block_with_key(key.as_ref()) {
+    pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TSSTable::Value>> {
+        if let Some(block_addr) = self.sstable_index.get_block_with_key(key.as_ref()).await {
             let sstable_reader = self.sstable_delta_reader_block(block_addr)?;
             return self.do_get(key, sstable_reader);
         }
@@ -566,7 +610,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
 
     /// Lookups the value corresponding to the key.
     pub async fn get_async<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TSSTable::Value>> {
-        if let Some(block_addr) = self.sstable_index.get_block_with_key(key.as_ref()) {
+        if let Some(block_addr) = self.sstable_index.get_block_with_key(key.as_ref()).await {
             let sstable_reader = self.sstable_delta_reader_block_async(block_addr).await?;
             return self.do_get(key, sstable_reader);
         }
@@ -611,16 +655,13 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     }
 
     /// A stream of all the sorted terms.
-    pub fn stream(&self) -> io::Result<Streamer<TSSTable>> {
-        self.range().into_stream()
+    pub async fn stream(&self) -> io::Result<Streamer<TSSTable>> {
+        self.range().into_stream().await
     }
 
     /// Returns a search builder, to stream all of the terms
     /// within the Automaton
-    pub fn search<'a, A: Automaton + 'a>(
-        &'a self,
-        automaton: A,
-    ) -> StreamerBuilder<'a, TSSTable, A>
+    pub fn search<'a, A: Automaton + 'a>(&'a self, automaton: A) -> StreamerBuilder<'a, TSSTable, A>
     where
         A::State: Clone,
     {

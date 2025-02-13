@@ -1,7 +1,7 @@
-use std::io::{self, BufWriter, Write};
 use std::ops::Range;
 
 use common::{CountingWriter, OwnedBytes};
+use tokio::io::{self, AsyncWriteExt, BufWriter};
 use zstd::bulk::Compressor;
 
 use super::value::ValueWriter;
@@ -12,7 +12,8 @@ const VINT_MODE: u8 = 1u8;
 const BLOCK_LEN: usize = 4_000;
 
 pub struct DeltaWriter<W, TValueWriter>
-where W: io::Write
+where
+    W: io::AsyncWrite + Unpin,
 {
     block: Vec<u8>,
     write: CountingWriter<BufWriter<W>>,
@@ -24,7 +25,7 @@ where W: io::Write
 
 impl<W, TValueWriter> DeltaWriter<W, TValueWriter>
 where
-    W: io::Write,
+    W: io::AsyncWrite + Unpin,
     TValueWriter: ValueWriter,
 {
     pub fn new(wrt: W) -> Self {
@@ -41,7 +42,7 @@ where
         self.block_len = block_len
     }
 
-    pub fn flush_block(&mut self) -> io::Result<Option<Range<usize>>> {
+    pub async fn flush_block(&mut self) -> io::Result<Option<Range<usize>>> {
         if self.block.is_empty() {
             return Ok(None);
         }
@@ -64,21 +65,24 @@ where
             // verify compression had a positive impact
             if self.block.len() < buffer.len() {
                 self.write
-                    .write_all(&(self.block.len() as u32 + 1).to_le_bytes())?;
-                self.write.write_all(&[1])?;
-                self.write.write_all(&self.block[..])?;
+                    .write_all(&(self.block.len() as u32 + 1).to_le_bytes())
+                    .await?;
+                self.write.write_all(&[1]).await?;
+                self.write.write_all(&self.block[..]).await?;
             } else {
                 self.write
-                    .write_all(&(block_len as u32 + 1).to_le_bytes())?;
-                self.write.write_all(&[0])?;
-                self.write.write_all(&buffer[..])?;
+                    .write_all(&(block_len as u32 + 1).to_le_bytes())
+                    .await?;
+                self.write.write_all(&[0]).await?;
+                self.write.write_all(&buffer[..]).await?;
             }
         } else {
             self.write
-                .write_all(&(block_len as u32 + 1).to_le_bytes())?;
-            self.write.write_all(&[0])?;
-            self.write.write_all(&buffer[..])?;
-            self.write.write_all(&self.block[..])?;
+                .write_all(&(block_len as u32 + 1).to_le_bytes())
+                .await?;
+            self.write.write_all(&[0]).await?;
+            self.write.write_all(&buffer[..]).await?;
+            self.write.write_all(&self.block[..]).await?;
         }
 
         let end_offset = self.write.written_bytes() as usize;
@@ -110,9 +114,9 @@ where
         self.value_writer.write(value);
     }
 
-    pub fn flush_block_if_required(&mut self) -> io::Result<Option<Range<usize>>> {
+    pub async fn flush_block_if_required(&mut self) -> io::Result<Option<Range<usize>>> {
         if self.block.len() > self.block_len {
-            return self.flush_block();
+            return self.flush_block().await;
         }
         Ok(None)
     }
@@ -131,7 +135,8 @@ pub struct DeltaReader<TValueReader> {
 }
 
 impl<TValueReader> DeltaReader<TValueReader>
-where TValueReader: value::ValueReader
+where
+    TValueReader: value::ValueReader,
 {
     pub fn new(reader: OwnedBytes) -> Self {
         DeltaReader {

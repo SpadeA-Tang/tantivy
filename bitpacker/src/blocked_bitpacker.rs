@@ -87,7 +87,7 @@ impl BlockedBitpacker {
         }
     }
 
-    pub fn flush(&mut self) {
+    pub async fn flush(&mut self) {
         if let Some((min_value, max_value)) = minmax(self.buffer.iter()) {
             let mut bit_packer = BitPacker::new();
             let num_bits_block = compute_num_bits(*max_value - min_value);
@@ -107,9 +107,10 @@ impl BlockedBitpacker {
                         num_bits_block,
                         &mut self.compressed_blocks,
                     )
+                    .await
                     .expect("cannot write bitpacking to output"); // write to in memory can't fail
             }
-            bit_packer.flush(&mut self.compressed_blocks).unwrap();
+            bit_packer.flush(&mut self.compressed_blocks).await.unwrap();
             self.offset_and_bits
                 .push(BlockedBitpackerEntryMetaData::new(
                     offset,

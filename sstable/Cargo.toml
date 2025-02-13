@@ -17,6 +17,8 @@ tantivy-bitpacker = { version= "0.6", path="../bitpacker" }
 tantivy-fst = "0.5"
 # experimental gives us access to Decompressor::upper_bound
 zstd = { version = "0.13", features = ["experimental"] }
+async-trait = "0.1"
+tokio = { version = "1.29.1", features = ["full"] }
 
 [dev-dependencies]
 proptest = "1"

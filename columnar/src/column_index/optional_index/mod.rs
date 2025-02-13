@@ -1,14 +1,15 @@
-use std::io::{self, Write};
 use std::sync::Arc;
 
 mod set;
 mod set_block;
 
+use async_trait::async_trait;
 use common::{BinarySerializable, OwnedBytes, VInt};
 pub use set::{SelectCursor, Set, SetCodec};
 use set_block::{
     DenseBlock, DenseBlockCodec, SparseBlock, SparseBlockCodec, DENSE_BLOCK_NUM_BYTES,
 };
+use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::iterable::Iterable;
 use crate::{DocId, InvalidData, RowId};
@@ -176,7 +177,8 @@ impl SelectCursor<RowId> for OptionalIndexSelectCursor<'_> {
 impl Set<RowId> for OptionalIndex {
     type SelectCursor<'b>
         = OptionalIndexSelectCursor<'b>
-    where Self: 'b;
+    where
+        Self: 'b;
     // Check if value at position is not null.
     #[inline]
     fn contains(&self, row_id: RowId) -> bool {
@@ -258,16 +260,18 @@ impl Set<RowId> for OptionalIndex {
 }
 
 impl OptionalIndex {
-    pub fn for_test(num_rows: RowId, row_ids: &[RowId]) -> OptionalIndex {
+    pub async fn for_test(num_rows: RowId, row_ids: &[RowId]) -> OptionalIndex {
         assert!(row_ids
             .last()
             .copied()
             .map(|last_row_id| last_row_id < num_rows)
             .unwrap_or(true));
         let mut buffer = Vec::new();
-        serialize_optional_index(&row_ids, num_rows, &mut buffer).unwrap();
+        serialize_optional_index(&row_ids, num_rows, &mut buffer)
+            .await
+            .unwrap();
         let bytes = OwnedBytes::new(buffer);
-        open_optional_index(bytes).unwrap()
+        open_optional_index(bytes).await.unwrap()
     }
 
     pub fn num_docs(&self) -> RowId {
@@ -352,34 +356,41 @@ impl OptionalIndexCodec {
     }
 }
 
+#[async_trait]
 impl BinarySerializable for OptionalIndexCodec {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(&[self.to_code()])
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        writer.write_all(&[self.to_code()]).await
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
-        let optional_codec_code = u8::deserialize(reader)?;
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        let optional_codec_code = u8::deserialize(reader).await?;
         let optional_codec = Self::try_from_code(optional_codec_code)?;
         Ok(optional_codec)
     }
 }
 
-fn serialize_optional_index_block(block_els: &[u16], out: &mut impl io::Write) -> io::Result<()> {
+async fn serialize_optional_index_block(
+    block_els: &[u16],
+    out: &mut (impl AsyncWrite + ?Sized + Unpin + Send),
+) -> io::Result<()> {
     let is_sparse = is_sparse(block_els.len() as u32);
     if is_sparse {
-        SparseBlockCodec::serialize(block_els.iter().copied(), out)?;
+        SparseBlockCodec::serialize(block_els.iter().copied(), out).await?;
     } else {
-        DenseBlockCodec::serialize(block_els.iter().copied(), out)?;
+        DenseBlockCodec::serialize(block_els.iter().copied(), out).await?;
     }
     Ok(())
 }
 
-pub fn serialize_optional_index<W: io::Write>(
+pub async fn serialize_optional_index<W: AsyncWrite + ?Sized + Unpin + Send>(
     non_null_rows: &dyn Iterable<RowId>,
     num_rows: RowId,
     output: &mut W,
 ) -> io::Result<()> {
-    VInt(num_rows as u64).serialize(output)?;
+    VInt(num_rows as u64).serialize(output).await?;
 
     let mut rows_it = non_null_rows.boxed_iter();
     let mut block_metadata: Vec<SerializedBlockMeta> = Vec::new();
@@ -388,7 +399,7 @@ pub fn serialize_optional_index<W: io::Write>(
     // This if-statement for the first element ensures that
     // `block_metadata` is not empty in the loop below.
     let Some(idx) = rows_it.next() else {
-        output.write_all(&0u16.to_le_bytes())?;
+        output.write_all(&0u16.to_le_bytes()).await?;
         return Ok(());
     };
 
@@ -400,7 +411,7 @@ pub fn serialize_optional_index<W: io::Write>(
     for idx in rows_it {
         let value_addr = row_addr_from_row_id(idx);
         if current_block_id != value_addr.block_id {
-            serialize_optional_index_block(&current_block[..], output)?;
+            serialize_optional_index_block(&current_block[..], output).await?;
             block_metadata.push(SerializedBlockMeta {
                 block_id: current_block_id,
                 num_non_null_rows: current_block.len() as u32,
@@ -412,7 +423,7 @@ pub fn serialize_optional_index<W: io::Write>(
     }
 
     // handle last block
-    serialize_optional_index_block(&current_block[..], output)?;
+    serialize_optional_index_block(&current_block[..], output).await?;
 
     block_metadata.push(SerializedBlockMeta {
         block_id: current_block_id,
@@ -420,10 +431,12 @@ pub fn serialize_optional_index<W: io::Write>(
     });
 
     for block in &block_metadata {
-        output.write_all(&block.to_bytes())?;
+        output.write_all(&block.to_bytes()).await?;
     }
 
-    output.write_all((block_metadata.len() as u16).to_le_bytes().as_ref())?;
+    output
+        .write_all((block_metadata.len() as u16).to_le_bytes().as_ref())
+        .await?;
 
     Ok(())
 }
@@ -515,11 +528,11 @@ fn deserialize_optional_index_block_metadatas(
     (block_metas.into_boxed_slice(), non_null_rows_before_block)
 }
 
-pub fn open_optional_index(bytes: OwnedBytes) -> io::Result<OptionalIndex> {
+pub async fn open_optional_index(bytes: OwnedBytes) -> io::Result<OptionalIndex> {
     let (mut bytes, num_non_empty_blocks_bytes) = bytes.rsplit(2);
     let num_non_empty_block_bytes =
         u16::from_le_bytes(num_non_empty_blocks_bytes.as_slice().try_into().unwrap());
-    let num_rows = VInt::deserialize_u64(&mut bytes)? as u32;
+    let num_rows = VInt::deserialize_u64(&mut bytes).await? as u32;
     let block_metas_num_bytes =
         num_non_empty_block_bytes as usize * SERIALIZED_BLOCK_META_NUM_BYTES;
     let (block_data, block_metas) = bytes.rsplit(block_metas_num_bytes);

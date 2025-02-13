@@ -30,9 +30,9 @@ impl fmt::Debug for BytesColumn {
 }
 
 impl BytesColumn {
-    pub fn empty(num_docs: u32) -> BytesColumn {
+    pub async fn empty(num_docs: u32) -> BytesColumn {
         BytesColumn {
-            dictionary: Arc::new(Dictionary::empty()),
+            dictionary: Arc::new(Dictionary::empty().await),
             term_ord_column: Column::build_empty_column(num_docs),
         }
     }
@@ -41,8 +41,8 @@ impl BytesColumn {
     ///
     /// Returns `false` if the term does not exist (e.g. `term_ord` is greater or equal to the
     /// overll number of terms).
-    pub fn ord_to_bytes(&self, ord: u64, output: &mut Vec<u8>) -> io::Result<bool> {
-        self.dictionary.ord_to_term(ord, output)
+    pub async fn ord_to_bytes(&self, ord: u64, output: &mut Vec<u8>) -> io::Result<bool> {
+        self.dictionary.ord_to_term(ord, output).await
     }
 
     /// Returns the number of rows in the column.
@@ -93,10 +93,10 @@ impl StrColumn {
     }
 
     /// Fills the buffer
-    pub fn ord_to_str(&self, term_ord: u64, output: &mut String) -> io::Result<bool> {
+    pub async fn ord_to_str(&self, term_ord: u64, output: &mut String) -> io::Result<bool> {
         unsafe {
             let buf = output.as_mut_vec();
-            if !self.0.dictionary.ord_to_term(term_ord, buf)? {
+            if !self.0.dictionary.ord_to_term(term_ord, buf).await? {
                 return Ok(false);
             }
             // TODO consider remove checks if it hurts performance.

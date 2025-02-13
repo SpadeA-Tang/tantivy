@@ -81,6 +81,7 @@
 //!
 //! See the `custom_collector` example.
 
+use async_trait::async_trait;
 use downcast_rs::impl_downcast;
 
 use crate::{DocId, Score, SegmentOrdinal, SegmentReader};
@@ -265,6 +266,7 @@ impl<TCollector: Collector> Collector for Option<TCollector> {
 ///
 /// `.collect(doc, score)` will be called for every documents
 /// matching the query.
+#[async_trait]
 pub trait SegmentCollector: 'static {
     /// `Fruit` is the type for the result of our collection.
     /// e.g. `usize` for the `Count` collector.
@@ -285,7 +287,7 @@ pub trait SegmentCollector: 'static {
     }
 
     /// Extract the fruit of the collection from the `SegmentCollector`.
-    fn harvest(self) -> Self::Fruit;
+    async fn harvest(self) -> Self::Fruit;
 }
 
 // -----------------------------------------------

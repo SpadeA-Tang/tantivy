@@ -19,9 +19,9 @@ struct TermInfoBlockMeta {
     postings_offset_nbits: u8,
     positions_offset_nbits: u8,
 }
-
+#[async_trait]
 impl BinarySerializable for TermInfoBlockMeta {
-    fn serialize<W: Write + ?Sized>(&self, write: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, write: &mut W) -> io::Result<()> {
         self.offset.serialize(write)?;
         self.ref_term_info.serialize(write)?;
         write.write_all(&[
@@ -32,7 +32,7 @@ impl BinarySerializable for TermInfoBlockMeta {
         Ok(())
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let offset = u64::deserialize(reader)?;
         let ref_term_info = TermInfo::deserialize(reader)?;
         let mut buffer = [0u8; 3];

@@ -1,5 +1,7 @@
-use std::io;
-use std::io::{Read, Write};
+use async_trait::async_trait;
+use futures::StreamExt;
+use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 
 use super::BinarySerializable;
 
@@ -21,25 +23,32 @@ pub fn serialize_vint_u128(mut val: u128, output: &mut Vec<u8>) {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VIntU128(pub u128);
 
+#[async_trait]
 impl BinarySerializable for VIntU128 {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         let mut buffer = vec![];
         serialize_vint_u128(self.0, &mut buffer);
-        writer.write_all(&buffer)
+        writer.write_all(&buffer).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut bytes = reader.bytes();
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        let mut stream = ReaderStream::new(reader);
         let mut result = 0u128;
         let mut shift = 0u64;
+
         loop {
-            match bytes.next() {
-                Some(Ok(b)) => {
-                    result |= u128::from(b % 128u8) << shift;
-                    if b >= STOP_BIT {
-                        return Ok(VIntU128(result));
+            match stream.next().await {
+                Some(Ok(bytes)) => {
+                    for b in bytes {
+                        result |= u128::from(b % 128u8) << shift;
+                        if b >= STOP_BIT {
+                            return Ok(VIntU128(result));
+                        }
+                        shift += 7;
                     }
-                    shift += 7;
                 }
                 _ => {
                     return Err(io::Error::new(
@@ -151,10 +160,13 @@ pub fn read_u32_vint_no_advance(data: &[u8]) -> (u32, usize) {
     (result, vlen)
 }
 /// Write a `u32` as a vint payload.
-pub fn write_u32_vint<W: io::Write + ?Sized>(val: u32, writer: &mut W) -> io::Result<()> {
+pub async fn write_u32_vint<W: AsyncWrite + ?Sized + Unpin + Send>(
+    val: u32,
+    writer: &mut W,
+) -> io::Result<()> {
     let mut buf = [0u8; 8];
     let data = serialize_vint_u32(val, &mut buf);
-    writer.write_all(data)
+    writer.write_all(data).await
 }
 
 impl VInt {
@@ -162,8 +174,8 @@ impl VInt {
         self.0
     }
 
-    pub fn deserialize_u64<R: Read>(reader: &mut R) -> io::Result<u64> {
-        VInt::deserialize(reader).map(|vint| vint.0)
+    pub async fn deserialize_u64<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<u64> {
+        VInt::deserialize(reader).await.map(|vint| vint.0)
     }
 
     pub fn serialize_into_vec(&self, output: &mut Vec<u8>) {
@@ -188,25 +200,31 @@ impl VInt {
     }
 }
 
+#[async_trait]
 impl BinarySerializable for VInt {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         let mut buffer = [0u8; 10];
         let num_bytes = self.serialize_into(&mut buffer);
-        writer.write_all(&buffer[0..num_bytes])
+        writer.write_all(&buffer[0..num_bytes]).await
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut bytes = reader.bytes();
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
+        let mut stream = ReaderStream::new(reader);
         let mut result = 0u64;
         let mut shift = 0u64;
         loop {
-            match bytes.next() {
-                Some(Ok(b)) => {
-                    result |= u64::from(b % 128u8) << shift;
-                    if b >= STOP_BIT {
-                        return Ok(VInt(result));
+            match stream.next().await {
+                Some(Ok(bytes)) => {
+                    for b in bytes {
+                        result |= u64::from(b % 128u8) << shift;
+                        if b >= STOP_BIT {
+                            return Ok(VInt(result));
+                        }
+                        shift += 7;
                     }
-                    shift += 7;
                 }
                 _ => {
                     return Err(io::Error::new(

@@ -2,6 +2,7 @@ use std::io;
 use std::io::Write;
 
 use common::{CountingWriter, OwnedBytes};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::multivalued_index::SerializableMultivalueIndex;
 use super::OptionalIndex;
@@ -42,21 +43,21 @@ impl SerializableColumnIndex<'_> {
 }
 
 /// Serialize a column index.
-pub fn serialize_column_index(
-    column_index: SerializableColumnIndex,
-    output: &mut impl Write,
+pub async fn serialize_column_index(
+    column_index: SerializableColumnIndex<'_>,
+    output: &mut (impl AsyncWrite + Unpin + Send),
 ) -> io::Result<u32> {
     let mut output = CountingWriter::wrap(output);
     let cardinality = column_index.get_cardinality().to_code();
-    output.write_all(&[cardinality])?;
+    output.write_all(&[cardinality]).await?;
     match column_index {
         SerializableColumnIndex::Full => {}
         SerializableColumnIndex::Optional(SerializableOptionalIndex {
             non_null_row_ids,
             num_rows,
-        }) => serialize_optional_index(non_null_row_ids.as_ref(), num_rows, &mut output)?,
+        }) => serialize_optional_index(non_null_row_ids.as_ref(), num_rows, &mut output).await?,
         SerializableColumnIndex::Multivalued(multivalued_index) => {
-            serialize_multivalued_index(&multivalued_index, &mut output)?
+            serialize_multivalued_index(&multivalued_index, &mut output).await?
         }
     }
     let column_index_num_bytes = output.written_bytes() as u32;
@@ -64,7 +65,7 @@ pub fn serialize_column_index(
 }
 
 /// Open a serialized column index.
-pub fn open_column_index(
+pub async fn open_column_index(
     mut bytes: OwnedBytes,
     format_version: Version,
 ) -> io::Result<ColumnIndex> {
@@ -80,12 +81,12 @@ pub fn open_column_index(
     match cardinality {
         Cardinality::Full => Ok(ColumnIndex::Full),
         Cardinality::Optional => {
-            let optional_index = super::optional_index::open_optional_index(bytes)?;
+            let optional_index = super::optional_index::open_optional_index(bytes).await?;
             Ok(ColumnIndex::Optional(optional_index))
         }
         Cardinality::Multivalued => {
             let multivalue_index =
-                super::multivalued_index::open_multivalued_index(bytes, format_version)?;
+                super::multivalued_index::open_multivalued_index(bytes, format_version).await?;
             Ok(ColumnIndex::Multivalued(multivalue_index))
         }
     }

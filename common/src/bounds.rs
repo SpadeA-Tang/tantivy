@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io;
 use std::ops::Bound;
 
@@ -59,17 +60,21 @@ pub enum TransformBound<T> {
 
 /// Takes a bound and transforms the inner value into a new bound via a closure.
 /// The bound variant may change by the value returned value from the closure.
-pub fn transform_bound_inner_res<TFrom, TTo>(
+pub async fn transform_bound_inner_res<TFrom, TTo, Fut, F>(
     bound: &Bound<TFrom>,
-    transform: impl Fn(&TFrom) -> io::Result<TransformBound<TTo>>,
-) -> io::Result<Bound<TTo>> {
+    transform: F,
+) -> io::Result<Bound<TTo>>
+where
+    for<'a> F: Fn(&'a TFrom) -> Fut,
+    Fut: Future<Output = io::Result<TransformBound<TTo>>>,
+{
     use self::Bound::*;
     Ok(match bound {
-        Excluded(ref from_val) => match transform(from_val)? {
+        Excluded(ref from_val) => match transform(from_val).await? {
             TransformBound::NewBound(new_val) => new_val,
             TransformBound::Existing(new_val) => Excluded(new_val),
         },
-        Included(ref from_val) => match transform(from_val)? {
+        Included(ref from_val) => match transform(from_val).await? {
             TransformBound::NewBound(new_val) => new_val,
             TransformBound::Existing(new_val) => Included(new_val),
         },

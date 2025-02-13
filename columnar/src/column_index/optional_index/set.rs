@@ -1,7 +1,9 @@
-use std::io;
+use async_trait::async_trait;
+use tokio::io::{self, AsyncWrite};
 
 /// A codec makes it possible to serialize a set of
 /// elements, and open the resulting Set representation.
+#[async_trait]
 pub trait SetCodec {
     type Item: Copy + TryFrom<usize> + Eq + std::hash::Hash + std::fmt::Debug;
     type Reader<'a>: Set<Self::Item>;
@@ -9,7 +11,10 @@ pub trait SetCodec {
     /// Serializes a set of unique sorted u16 elements.
     ///
     /// May panic if the elements are not sorted.
-    fn serialize(els: impl Iterator<Item = Self::Item>, wrt: impl io::Write) -> io::Result<()>;
+    async fn serialize(
+        els: impl Iterator<Item = Self::Item> + Send,
+        wrt: impl AsyncWrite + Unpin + Send,
+    ) -> io::Result<()>;
     fn open(data: &[u8]) -> Self::Reader<'_>;
 }
 
@@ -23,7 +28,8 @@ pub trait SelectCursor<T> {
 
 pub trait Set<T> {
     type SelectCursor<'b>: SelectCursor<T>
-    where Self: 'b;
+    where
+        Self: 'b;
 
     /// Returns true if the elements is contained in the Set
     fn contains(&self, el: T) -> bool;

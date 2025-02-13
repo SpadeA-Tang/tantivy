@@ -2,7 +2,9 @@ use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
 
+use async_trait::async_trait;
 use common::{BinarySerializable, VInt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::RowId;
 
@@ -27,16 +29,20 @@ impl ColumnStats {
     }
 }
 
+#[async_trait]
 impl BinarySerializable for ColumnStats {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        VInt(self.min_value).serialize(writer)?;
-        VInt(self.gcd.get()).serialize(writer)?;
-        VInt(self.amplitude() / self.gcd).serialize(writer)?;
-        VInt(self.num_rows as u64).serialize(writer)?;
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        VInt(self.min_value).serialize(writer).await?;
+        VInt(self.gcd.get()).serialize(writer).await?;
+        VInt(self.amplitude() / self.gcd).serialize(writer).await?;
+        VInt(self.num_rows as u64).serialize(writer).await?;
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let min_value = VInt::deserialize(reader)?.0;
         let gcd = VInt::deserialize(reader)?.0;
         let gcd = NonZeroU64::new(gcd)

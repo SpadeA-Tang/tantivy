@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
 use std::ops::Range;
+use tokio::io::AsyncWrite;
 
 use common::{BinarySerializable, CountingWriter, HasLen, VInt};
 
@@ -19,15 +19,15 @@ impl FileAddr {
         FileAddr { field, idx }
     }
 }
-
+#[async_trait]
 impl BinarySerializable for FileAddr {
-    fn serialize<W: Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
-        self.field.serialize(writer)?;
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(&self, writer: &mut W) -> io::Result<()> {
+        self.field.serialize(writer).await?;
         VInt(self.idx as u64).serialize(writer)?;
         Ok(())
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let field = Field::deserialize(reader)?;
         let idx = VInt::deserialize(reader)?.0 as usize;
         Ok(FileAddr { field, idx })
@@ -40,7 +40,7 @@ pub struct CompositeWrite<W = WritePtr> {
     offsets: Vec<(FileAddr, u64)>,
 }
 
-impl<W: TerminatingWrite + Write> CompositeWrite<W> {
+impl<W: TerminatingWrite + AsyncWrite> CompositeWrite<W> {
     /// Crate a new API writer that writes a composite file
     /// in a given write.
     pub fn wrap(w: W) -> CompositeWrite<W> {

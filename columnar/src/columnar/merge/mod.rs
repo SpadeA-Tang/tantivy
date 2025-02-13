@@ -271,11 +271,11 @@ impl GroupedColumnsHandle {
             columns: vec![None; num_columnars],
         }
     }
-    fn open(self, merge_row_order: &MergeRowOrder) -> io::Result<GroupedColumns> {
+    async fn open(self, merge_row_order: &MergeRowOrder) -> io::Result<GroupedColumns> {
         let mut columns: Vec<Option<DynamicColumn>> = Vec::new();
         for (columnar_id, column) in self.columns.iter().enumerate() {
             if let Some(column) = column {
-                let column = column.open()?;
+                let column = column.open().await?;
                 // We skip columns that end up with 0 documents.
                 // That way, we make sure they don't end up influencing the merge type or
                 // creating empty columns.

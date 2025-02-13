@@ -1,9 +1,8 @@
-use std::io;
-use std::io::Write;
 use std::ops::Range;
 use std::sync::Arc;
 
 use common::{CountingWriter, OwnedBytes};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 
 use super::optional_index::{open_optional_index, serialize_optional_index};
 use super::{OptionalIndex, SerializableOptionalIndex, Set};
@@ -18,9 +17,9 @@ pub struct SerializableMultivalueIndex<'a> {
     pub start_offsets: Box<dyn Iterable<u32> + 'a>,
 }
 
-pub fn serialize_multivalued_index(
-    multivalued_index: &SerializableMultivalueIndex,
-    output: &mut impl Write,
+pub async fn serialize_multivalued_index(
+    multivalued_index: &SerializableMultivalueIndex<'_>,
+    output: &mut (impl AsyncWrite + Unpin + Send),
 ) -> io::Result<()> {
     let SerializableMultivalueIndex {
         doc_ids_with_values,
@@ -31,19 +30,20 @@ pub fn serialize_multivalued_index(
         non_null_row_ids,
         num_rows,
     } = doc_ids_with_values;
-    serialize_optional_index(&**non_null_row_ids, *num_rows, &mut count_writer)?;
+    serialize_optional_index(&**non_null_row_ids, *num_rows, &mut count_writer).await?;
     let optional_len = count_writer.written_bytes() as u32;
     let output = count_writer.finish();
     serialize_u64_based_column_values(
         &**start_offsets,
         &[CodecType::Bitpacked, CodecType::Linear],
         output,
-    )?;
-    output.write_all(&optional_len.to_le_bytes())?;
+    )
+    .await?;
+    output.write_all(&optional_len.to_le_bytes()).await?;
     Ok(())
 }
 
-pub fn open_multivalued_index(
+pub async fn open_multivalued_index(
     bytes: OwnedBytes,
     format_version: Version,
 ) -> io::Result<MultiValueIndex> {
@@ -61,7 +61,7 @@ pub fn open_multivalued_index(
                 u32::from_le_bytes(optional_index_len.as_slice().try_into().unwrap());
             let (optional_index_bytes, start_index_bytes) =
                 body_bytes.split(optional_index_len as usize);
-            let optional_index = open_optional_index(optional_index_bytes)?;
+            let optional_index = open_optional_index(optional_index_bytes).await?;
             let start_index_column: Arc<dyn ColumnValues<RowId>> =
                 load_u64_based_column_values(start_index_bytes)?;
             Ok(MultiValueIndex::MultiValueIndexV2(MultiValueIndexV2 {
@@ -165,7 +165,7 @@ impl std::fmt::Debug for MultiValueIndex {
 }
 
 impl MultiValueIndex {
-    pub fn for_test(start_offsets: &[RowId]) -> MultiValueIndex {
+    pub async fn for_test(start_offsets: &[RowId]) -> MultiValueIndex {
         assert!(!start_offsets.is_empty());
         assert_eq!(start_offsets[0], 0);
         let mut doc_with_values = Vec::new();
@@ -184,9 +184,11 @@ impl MultiValueIndex {
             start_offsets: Box::new(&compact_start_offsets[..]),
         };
         let mut buffer = Vec::new();
-        serialize_multivalued_index(&serializable_multivalued_index, &mut buffer).unwrap();
+        serialize_multivalued_index(&serializable_multivalued_index, &mut buffer)
+            .await
+            .unwrap();
         let bytes = OwnedBytes::new(buffer);
-        open_multivalued_index(bytes, Version::V2).unwrap()
+        open_multivalued_index(bytes, Version::V2).await.unwrap()
     }
 
     pub fn get_start_index_column(&self) -> &Arc<dyn crate::ColumnValues<RowId>> {

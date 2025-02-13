@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 mod compact_space;
 
+use async_trait::async_trait;
 use common::{BinarySerializable, OwnedBytes, VInt};
 pub use compact_space::{
     CompactSpaceCompressor, CompactSpaceDecompressor, CompactSpaceU64Accessor,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::column_values::monotonic_map_column;
 use crate::column_values::monotonic_mapping::{
@@ -23,14 +25,18 @@ pub(crate) struct U128Header {
     pub codec_type: U128FastFieldCodecType,
 }
 
+#[async_trait]
 impl BinarySerializable for U128Header {
-    fn serialize<W: io::Write + ?Sized>(&self, writer: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> io::Result<()> {
         VInt(self.num_vals as u64).serialize(writer)?;
         self.codec_type.serialize(writer)?;
         Ok(())
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let num_vals = VInt::deserialize(reader)?.0 as u32;
         let codec_type = U128FastFieldCodecType::deserialize(reader)?;
         Ok(U128Header {
@@ -41,9 +47,9 @@ impl BinarySerializable for U128Header {
 }
 
 /// Serializes u128 values with the compact space codec.
-pub fn serialize_column_values_u128<T: MonotonicallyMappableToU128>(
+pub async fn serialize_column_values_u128<T: MonotonicallyMappableToU128>(
     iterable: &dyn Iterable<T>,
-    output: &mut impl io::Write,
+    output: &mut (impl AsyncWrite + Unpin + Send),
 ) -> io::Result<()> {
     let compressor = CompactSpaceCompressor::train_from(
         iterable
@@ -54,13 +60,15 @@ pub fn serialize_column_values_u128<T: MonotonicallyMappableToU128>(
         num_vals: compressor.num_vals(),
         codec_type: U128FastFieldCodecType::CompactSpace,
     };
-    header.serialize(output)?;
-    compressor.compress_into(
-        iterable
-            .boxed_iter()
-            .map(MonotonicallyMappableToU128::to_u128),
-        output,
-    )?;
+    header.serialize(output).await?;
+    compressor
+        .compress_into(
+            iterable
+                .boxed_iter()
+                .map(MonotonicallyMappableToU128::to_u128),
+            output,
+        )
+        .await?;
     Ok(())
 }
 
@@ -73,12 +81,16 @@ pub(crate) enum U128FastFieldCodecType {
     CompactSpace = 1,
 }
 
+#[async_trait]
 impl BinarySerializable for U128FastFieldCodecType {
-    fn serialize<W: Write + ?Sized>(&self, wrt: &mut W) -> io::Result<()> {
+    async fn serialize<W: AsyncWrite + ?Sized + Unpin + Send>(
+        &self,
+        wrt: &mut W,
+    ) -> io::Result<()> {
         self.to_code().serialize(wrt)
     }
 
-    fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(reader: &mut R) -> io::Result<Self> {
         let code = u8::deserialize(reader)?;
         let codec_type: Self = Self::from_code(code)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Unknown code `{code}.`"))?;
@@ -100,12 +112,12 @@ impl U128FastFieldCodecType {
 }
 
 /// Returns the correct codec reader wrapped in the `Arc` for the data.
-pub fn open_u128_mapped<T: MonotonicallyMappableToU128 + Debug>(
+pub async fn open_u128_mapped<T: MonotonicallyMappableToU128 + Debug>(
     mut bytes: OwnedBytes,
 ) -> io::Result<Arc<dyn ColumnValues<T>>> {
-    let header = U128Header::deserialize(&mut bytes)?;
+    let header = U128Header::deserialize(&mut bytes).await?;
     assert_eq!(header.codec_type, U128FastFieldCodecType::CompactSpace);
-    let reader = CompactSpaceDecompressor::open(bytes)?;
+    let reader = CompactSpaceDecompressor::open(bytes).await?;
     let inverted: StrictlyMonotonicMappingInverter<StrictlyMonotonicMappingToInternal<T>> =
         StrictlyMonotonicMappingToInternal::<T>::new().into();
     Ok(Arc::new(monotonic_map_column(reader, inverted)))

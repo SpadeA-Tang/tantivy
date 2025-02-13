@@ -1,5 +1,7 @@
-use std::io::{self, Write};
 use std::ops::Range;
+
+use async_trait::async_trait;
+use tokio::io::{self, AsyncWriteExt};
 
 use merge::ValueMerger;
 
@@ -46,16 +48,17 @@ pub struct SSTableDataCorruption;
 
 /// SSTable makes it possible to read and write
 /// sstables with typed values.
+#[async_trait]
 pub trait SSTable: Sized {
-    type Value: Clone;
-    type ValueReader: ValueReader<Value = Self::Value>;
-    type ValueWriter: ValueWriter<Value = Self::Value>;
+    type Value: Clone + Send + Sync;
+    type ValueReader: ValueReader<Value = Self::Value> + Send;
+    type ValueWriter: ValueWriter<Value = Self::Value> + Send;
 
-    fn delta_writer<W: io::Write>(write: W) -> DeltaWriter<W, Self::ValueWriter> {
+    fn delta_writer<W: io::AsyncWrite + Unpin>(write: W) -> DeltaWriter<W, Self::ValueWriter> {
         DeltaWriter::new(write)
     }
 
-    fn writer<W: io::Write>(wrt: W) -> Writer<W, Self::ValueWriter> {
+    fn writer<W: io::AsyncWrite + Unpin + Send>(wrt: W) -> Writer<W, Self::ValueWriter> {
         Writer::new(wrt)
     }
 
@@ -75,19 +78,20 @@ pub trait SSTable: Sized {
         Self::reader(OwnedBytes::empty())
     }
 
-    fn merge<W: io::Write, M: ValueMerger<Self::Value>>(
+    async fn merge<W: io::AsyncWrite + Unpin + Send, M: ValueMerger<Self::Value> + Send>(
         io_readers: Vec<OwnedBytes>,
         w: W,
         merger: M,
     ) -> io::Result<()> {
         let readers: Vec<_> = io_readers.into_iter().map(Self::reader).collect();
         let writer = Self::writer(w);
-        merge::merge_sstable::<Self, _, _>(readers, writer, merger)
+        merge::merge_sstable::<Self, _, _>(readers, writer, merger).await
     }
 }
 
 pub struct VoidSSTable;
 
+#[async_trait]
 impl SSTable for VoidSSTable {
     type Value = ();
     type ValueReader = value::VoidValueReader;
@@ -102,6 +106,7 @@ impl SSTable for VoidSSTable {
 /// `range_sstable[k1] <= range_sstable[k2]`.
 pub struct MonotonicU64SSTable;
 
+#[async_trait]
 impl SSTable for MonotonicU64SSTable {
     type Value = u64;
 
@@ -122,6 +127,7 @@ impl SSTable for MonotonicU64SSTable {
 #[derive(Clone, Copy, Debug)]
 pub struct RangeSSTable;
 
+#[async_trait]
 impl SSTable for RangeSSTable {
     type Value = Range<u64>;
 
@@ -137,7 +143,8 @@ pub struct Reader<TValueReader> {
 }
 
 impl<TValueReader> Reader<TValueReader>
-where TValueReader: ValueReader
+where
+    TValueReader: ValueReader,
 {
     pub fn advance(&mut self) -> io::Result<bool> {
         if !self.delta_reader.advance()? {
@@ -170,7 +177,8 @@ impl<TValueReader> AsRef<[u8]> for Reader<TValueReader> {
 }
 
 pub struct Writer<W, TValueWriter>
-where W: io::Write
+where
+    W: io::AsyncWrite + Unpin,
 {
     previous_key: Vec<u8>,
     index_builder: SSTableIndexBuilder,
@@ -181,7 +189,7 @@ where W: io::Write
 
 impl<W, TValueWriter> Writer<W, TValueWriter>
 where
-    W: io::Write,
+    W: io::AsyncWrite + Unpin + Send,
     TValueWriter: value::ValueWriter,
 {
     /// Use `Self::new`. This method only exists to match its
@@ -226,13 +234,13 @@ where
     ///
     /// Will panics if keys are inserted in an invalid order.
     #[inline]
-    pub fn insert<K: AsRef<[u8]>>(
+    pub async fn insert<K: AsRef<[u8]>>(
         &mut self,
         key: K,
         value: &TValueWriter::Value,
     ) -> io::Result<()> {
         self.insert_key(key.as_ref())?;
-        self.insert_value(value)?;
+        self.insert_value(value).await?;
         Ok(())
     }
 
@@ -269,14 +277,14 @@ where
     /// Horribly dangerous internal API. See `.insert(...)`.
     #[doc(hidden)]
     #[inline]
-    pub fn insert_value(&mut self, value: &TValueWriter::Value) -> io::Result<()> {
+    pub async fn insert_value(&mut self, value: &TValueWriter::Value) -> io::Result<()> {
         self.delta_writer.write_value(value);
         self.num_terms += 1u64;
-        self.flush_block_if_required()
+        self.flush_block_if_required().await
     }
 
-    pub fn flush_block_if_required(&mut self) -> io::Result<()> {
-        if let Some(byte_range) = self.delta_writer.flush_block_if_required()? {
+    pub async fn flush_block_if_required(&mut self) -> io::Result<()> {
+        if let Some(byte_range) = self.delta_writer.flush_block_if_required().await? {
             self.index_builder.add_block(
                 &self.previous_key[..],
                 byte_range,
@@ -288,8 +296,8 @@ where
         Ok(())
     }
 
-    pub fn finish(mut self) -> io::Result<W> {
-        if let Some(byte_range) = self.delta_writer.flush_block()? {
+    pub async fn finish(mut self) -> io::Result<W> {
+        if let Some(byte_range) = self.delta_writer.flush_block().await? {
             self.index_builder.add_block(
                 &self.previous_key[..],
                 byte_range,
@@ -299,19 +307,19 @@ where
         }
         let mut wrt = self.delta_writer.finish();
         // add a final empty block as an end marker
-        wrt.write_all(&0u32.to_le_bytes())?;
+        wrt.write_all(&0u32.to_le_bytes()).await?;
 
         let offset = wrt.written_bytes();
 
-        let fst_len: u64 = self.index_builder.serialize(&mut wrt)?;
-        wrt.write_all(&fst_len.to_le_bytes())?;
-        wrt.write_all(&offset.to_le_bytes())?;
-        wrt.write_all(&self.num_terms.to_le_bytes())?;
+        let fst_len: u64 = self.index_builder.serialize(&mut wrt).await?;
+        wrt.write_all(&fst_len.to_le_bytes()).await?;
+        wrt.write_all(&offset.to_le_bytes()).await?;
+        wrt.write_all(&self.num_terms.to_le_bytes()).await?;
 
-        SSTABLE_VERSION.serialize(&mut wrt)?;
+        SSTABLE_VERSION.serialize(&mut wrt).await?;
 
         let wrt = wrt.finish();
-        Ok(wrt.into_inner()?)
+        Ok(wrt.into_inner())
     }
 }
 

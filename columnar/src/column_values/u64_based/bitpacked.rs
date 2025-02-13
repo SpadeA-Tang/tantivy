@@ -2,9 +2,11 @@ use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::ops::{Range, RangeInclusive};
 
+use async_trait::async_trait;
 use common::{BinarySerializable, OwnedBytes};
 use fastdivide::DividerU64;
 use tantivy_bitpacker::{compute_num_bits, BitPacker, BitUnpacker};
+use tokio::io::AsyncWrite;
 
 use crate::column_values::u64_based::{ColumnCodec, ColumnCodecEstimator, ColumnStats};
 use crate::{ColumnValues, RowId};
@@ -104,6 +106,7 @@ fn num_bits(stats: &ColumnStats) -> u8 {
 #[derive(Default)]
 pub struct BitpackedCodecEstimator;
 
+#[async_trait]
 impl ColumnCodecEstimator for BitpackedCodecEstimator {
     fn collect(&mut self, _value: u64) {}
 
@@ -112,20 +115,22 @@ impl ColumnCodecEstimator for BitpackedCodecEstimator {
         Some(stats.num_bytes() + (stats.num_rows as u64 * (num_bits_per_value as u64) + 7) / 8)
     }
 
-    fn serialize(
+    async fn serialize(
         &self,
         stats: &ColumnStats,
         vals: &mut dyn Iterator<Item = u64>,
-        wrt: &mut dyn Write,
+        wrt: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> io::Result<()> {
-        stats.serialize(wrt)?;
+        stats.serialize(wrt).await?;
         let num_bits = num_bits(stats);
         let mut bit_packer = BitPacker::new();
         let divider = DividerU64::divide_by(stats.gcd.get());
         for val in vals {
-            bit_packer.write(divider.divide(val - stats.min_value), num_bits, wrt)?;
+            bit_packer
+                .write(divider.divide(val - stats.min_value), num_bits, wrt)
+                .await?;
         }
-        bit_packer.close(wrt)?;
+        bit_packer.close(wrt).await?;
         Ok(())
     }
 }
