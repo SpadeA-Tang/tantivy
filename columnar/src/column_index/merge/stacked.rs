@@ -25,9 +25,10 @@ pub fn merge_column_index_stacked<'a>(
             num_rows: stack_merge_order.num_rows(),
         }),
         Cardinality::Multivalued => {
-            let serializable_multivalue_index =
-                make_serializable_multivalued_index(columns, stack_merge_order);
-            SerializableColumnIndex::Multivalued(serializable_multivalue_index)
+            unimplemented!()
+            // let serializable_multivalue_index =
+            //     make_serializable_multivalued_index(columns, stack_merge_order);
+            // SerializableColumnIndex::Multivalued(serializable_multivalue_index)
         }
     }
 }
@@ -85,13 +86,14 @@ fn stack_doc_ids_with_values<'a>(
     stack_merge_order: &'a StackMergeOrder,
 ) -> SerializableOptionalIndex<'a> {
     let num_rows = stack_merge_order.num_rows();
-    SerializableOptionalIndex {
-        non_null_row_ids: Box::new(StackedDocIdsWithValues {
-            column_indexes,
-            stack_merge_order,
-        }),
-        num_rows,
-    }
+    unimplemented!()
+    // SerializableOptionalIndex {
+    //     non_null_row_ids: Box::new(StackedDocIdsWithValues {
+    //         column_indexes,
+    //         stack_merge_order,
+    //     }),
+    //     num_rows,
+    // }
 }
 
 struct StackedStartOffsets<'a> {
@@ -174,7 +176,8 @@ impl<'a> Iterable<RowId> for StackedOptionalIndex<'a> {
                 .flat_map(|(columnar_id, column_index_opt)| {
                     let columnar_row_range = self.stack_merge_order.columnar_range(columnar_id);
                     let rows_it: Box<dyn Iterator<Item = RowId>> = match column_index_opt {
-                        ColumnIndex::Full => Box::new(columnar_row_range),
+                        // ColumnIndex::Full => Box::new(columnar_row_range),
+                        ColumnIndex::Full => unimplemented!(),
                         ColumnIndex::Optional(optional_index) => Box::new(
                             optional_index
                                 .iter_rows()

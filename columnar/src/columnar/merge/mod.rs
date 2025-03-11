@@ -7,6 +7,8 @@ use std::io;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
+use common::ReadOnlyBitSet;
+use itertools::Itertools;
 pub use merge_mapping::{MergeRowOrder, ShuffleMergeOrder, StackMergeOrder};
 
 use super::writer::ColumnarSerializer;
@@ -18,7 +20,7 @@ use crate::columnar::ColumnarReader;
 use crate::dynamic_column::DynamicColumn;
 use crate::{
     BytesColumn, Column, ColumnIndex, ColumnType, ColumnValues, DynamicColumnHandle, NumericalType,
-    NumericalValue,
+    NumericalValue, RowAddr,
 };
 
 /// Column types are grouped into different categories.
@@ -85,6 +87,12 @@ pub fn merge_columnar(
         .map(|reader| reader.num_rows())
         .collect::<Vec<u32>>();
 
+    // todo: FIXME
+    let alive_bits: Vec<Option<ReadOnlyBitSet>> = (0..columnar_readers.len())
+        .into_iter()
+        .map(|_| None)
+        .collect_vec();
+
     let columns_to_merge =
         group_columns_for_merge(columnar_readers, required_columns, &merge_row_order)?;
     for res in columns_to_merge {
@@ -98,13 +106,15 @@ pub fn merge_columnar(
         let mut columns = grouped_columns.columns;
         coerce_columns(column_type, &mut columns)?;
 
+        let merge_order = get_merge_order_from_columns(columns.clone(), column_type, &alive_bits);
+
         let mut column_serializer =
             serializer.start_serialize_column(column_name.as_bytes(), column_type);
         merge_column(
             column_type,
             &num_rows_per_columnar,
             columns,
-            &merge_row_order,
+            &merge_order,
             &mut column_serializer,
         )?;
         column_serializer.finalize()?;
@@ -122,6 +132,58 @@ fn dynamic_column_to_u64_monotonic(dynamic_column: DynamicColumn) -> Option<Colu
         DynamicColumn::F64(column) => Some(column.to_u64_monotonic()),
         DynamicColumn::DateTime(column) => Some(column.to_u64_monotonic()),
         DynamicColumn::IpAddr(_) | DynamicColumn::Bytes(_) | DynamicColumn::Str(_) => None,
+    }
+}
+
+fn get_merge_order_from_columns(
+    columns: Vec<Option<DynamicColumn>>,
+    column_type: ColumnType,
+    alive_bitsets: &[Option<ReadOnlyBitSet>],
+) -> MergeRowOrder {
+    match column_type {
+        ColumnType::I64
+        | ColumnType::U64
+        | ColumnType::F64
+        | ColumnType::DateTime
+        | ColumnType::Bool => {
+            let mut column_indexes: Vec<ColumnIndex> = Vec::with_capacity(columns.len());
+            for (i, dynamic_column_opt) in columns.into_iter().enumerate() {
+                if let Some(Column { index: idx, values }) =
+                    dynamic_column_opt.and_then(dynamic_column_to_u64_monotonic)
+                {
+                    column_indexes.push(idx);
+                } else {
+                    // column_indexes.push(ColumnIndex::Empty {
+                    //     num_docs: num_docs_per_column[i],
+                    // });
+                    unimplemented!()
+                }
+            }
+
+            let mut new_row_id_to_old_row_id = column_indexes
+                .iter()
+                .enumerate()
+                .flat_map(|(idx, column_index)| {
+                    let ColumnIndex::Optional(index) = column_index else {
+                        unimplemented!()
+                    };
+
+                    index.iter_rows().map(move |row_id| RowAddr {
+                        row_id,
+                        segment_ord: idx as u32,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            new_row_id_to_old_row_id.sort_by(|row1, row2| row1.row_id.cmp(&row2.row_id));
+
+            MergeRowOrder::Shuffled(ShuffleMergeOrder {
+                new_row_id_to_old_row_id,
+                alive_bitsets: alive_bitsets.to_vec(),
+            })
+        }
+        ColumnType::IpAddr => unimplemented!(),
+        ColumnType::Bytes | ColumnType::Str => unimplemented!(),
     }
 }
 
@@ -383,6 +445,7 @@ fn is_empty_after_merge(
                 false
             }
         }
+        MergeRowOrder::Disjoint => false,
     }
 }
 

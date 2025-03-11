@@ -20,7 +20,7 @@ pub struct FastFieldsWriter {
     per_field_tokenizer: Vec<Option<TextAnalyzer>>,
     date_precisions: Vec<DateTimePrecision>,
     expand_dots: Vec<bool>,
-    num_docs: DocId,
+    pub num_docs: DocId,
     // Buffer that we recycle to avoid allocation.
     json_path_buffer: JsonPathWriter,
 }
@@ -106,8 +106,7 @@ impl FastFieldsWriter {
     }
 
     /// Indexes all of the fastfields of a new document.
-    pub fn add_document<D: Document>(&mut self, doc: &D) -> crate::Result<()> {
-        let doc_id = self.num_docs;
+    pub fn add_document<D: Document>(&mut self, doc_id: u32, doc: &D) -> crate::Result<()> {
         for (field, value) in doc.iter_fields_and_values() {
             let value_access = value as D::Value<'_>;
 

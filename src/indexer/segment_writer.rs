@@ -45,7 +45,7 @@ fn compute_initial_table_size(per_thread_memory_budget: usize) -> crate::Result<
 /// They creates the postings list in anonymous memory.
 /// The segment is laid on disk when the segment gets `finalized`.
 pub struct SegmentWriter {
-    pub(crate) max_doc: DocId,
+    pub(crate) doc_count: u32,
     pub(crate) ctx: IndexingContext,
     pub(crate) per_field_postings_writers: PerFieldPostingsWriter,
     pub(crate) segment_serializer: SegmentSerializer,
@@ -99,7 +99,7 @@ impl SegmentWriter {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            max_doc: 0,
+            doc_count: 0,
             ctx: IndexingContext::new(table_size),
             per_field_postings_writers,
             fieldnorms_writer: FieldNormsWriter::for_schema(&schema),
@@ -122,7 +122,7 @@ impl SegmentWriter {
     /// Finalize consumes the `SegmentWriter`, so that it cannot
     /// be used afterwards.
     pub fn finalize(mut self) -> crate::Result<Vec<u64>> {
-        self.fieldnorms_writer.fill_up_to_max_doc(self.max_doc);
+        self.fieldnorms_writer.fill_up_to_max_doc(self.doc_count);
         remap_and_write(
             self.schema,
             &self.per_field_postings_writers,
@@ -143,9 +143,17 @@ impl SegmentWriter {
             + self.segment_serializer.mem_usage()
     }
 
-    fn index_document<D: Document>(&mut self, doc: &D) -> crate::Result<()> {
-        let doc_id = self.max_doc;
+    pub fn print_mem_usage(&self) {
+        println!(
+            "mem_usage {}, fieldnorms_writer {}, fast_field_writers {}, segment_serializer {}",
+            self.ctx.mem_usage(),
+            self.fieldnorms_writer.mem_usage(),
+            self.fast_field_writers.mem_usage(),
+            self.segment_serializer.mem_usage()
+        );
+    }
 
+    fn index_document<D: Document>(&mut self, doc_id: u32, doc: &D) -> crate::Result<()> {
         // TODO: Can this be optimised a bit?
         let vals_grouped_by_field = doc
             .iter_fields_and_values()
@@ -349,13 +357,17 @@ impl SegmentWriter {
         &mut self,
         add_operation: AddOperation<D>,
     ) -> crate::Result<()> {
-        let AddOperation { document, opstamp } = add_operation;
+        let AddOperation {
+            document,
+            opstamp,
+            doc_id,
+        } = add_operation;
         self.doc_opstamps.push(opstamp);
-        self.fast_field_writers.add_document(&document)?;
-        self.index_document(&document)?;
+        self.fast_field_writers.add_document(doc_id, &document)?;
+        self.index_document(doc_id, &document)?;
         let doc_writer = self.segment_serializer.get_store_writer();
         doc_writer.store(&document, &self.schema)?;
-        self.max_doc += 1;
+        self.doc_count += 1;
         Ok(())
     }
 
@@ -366,7 +378,7 @@ impl SegmentWriter {
     /// Currently, **tantivy** does not handle deletes anyway,
     /// so `max_doc == num_docs`
     pub fn max_doc(&self) -> u32 {
-        self.max_doc
+        self.doc_count
     }
 
     /// Number of documents in the index.
@@ -376,7 +388,7 @@ impl SegmentWriter {
     /// so `max_doc == num_docs`
     #[allow(dead_code)]
     pub fn num_docs(&self) -> u32 {
-        self.max_doc
+        self.doc_count
     }
 }
 
@@ -394,6 +406,13 @@ fn remap_and_write(
     mut serializer: SegmentSerializer,
 ) -> crate::Result<()> {
     debug!("remap-and-write");
+    #[cfg(debug_assertions)]
+    println!(
+        "Finalizing... Id {:?}, Num docs {:?}",
+        serializer.segment().id(),
+        fast_field_writers.num_docs
+    );
+
     if let Some(fieldnorms_serializer) = serializer.extract_fieldnorms_serializer() {
         fieldnorms_writer.serialize(fieldnorms_serializer)?;
     }

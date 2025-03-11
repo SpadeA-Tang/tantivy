@@ -63,11 +63,10 @@ impl Iterable<u32> for ShuffledIndex<'_> {
         Box::new(
             self.merge_order
                 .iter_new_to_old_row_addrs()
-                .enumerate()
-                .filter_map(|(new_row_id, old_row_addr)| {
-                    let column_index = &self.column_indexes[old_row_addr.segment_ord as usize];
-                    let row_id = new_row_id as u32;
-                    if column_index.has_value(old_row_addr.row_id) {
+                .filter_map(|row_addr| {
+                    let column_index = &self.column_indexes[row_addr.segment_ord as usize];
+                    let row_id = row_addr.row_id as u32;
+                    if column_index.has_value(row_addr.row_id) {
                         Some(row_id)
                     } else {
                         None

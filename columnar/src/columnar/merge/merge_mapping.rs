@@ -4,6 +4,43 @@ use common::{BitSet, OwnedBytes, ReadOnlyBitSet};
 
 use crate::{ColumnarReader, RowAddr, RowId};
 
+pub enum MergeRowOrder {
+    /// Columnar tables are simply stacked one above the other.
+    /// If the i-th columnar_readers has n_rows_i rows, then
+    /// in the resulting columnar,
+    /// rows [r0..n_row_0) contains the row of `columnar_readers[0]`, in ordder
+    /// rows [n_row_0..n_row_0 + n_row_1 contains the row of `columnar_readers[1]`, in order.
+    /// ..
+    /// No documents is deleted.
+    Stack(StackMergeOrder),
+    /// Some more complex mapping, that may interleaves rows from the different readers and
+    /// drop rows, or do both.
+    Shuffled(ShuffleMergeOrder),
+    Disjoint,
+}
+
+impl From<StackMergeOrder> for MergeRowOrder {
+    fn from(stack_merge_order: StackMergeOrder) -> MergeRowOrder {
+        MergeRowOrder::Stack(stack_merge_order)
+    }
+}
+
+impl From<ShuffleMergeOrder> for MergeRowOrder {
+    fn from(shuffle_merge_order: ShuffleMergeOrder) -> MergeRowOrder {
+        MergeRowOrder::Shuffled(shuffle_merge_order)
+    }
+}
+
+impl MergeRowOrder {
+    pub fn num_rows(&self) -> RowId {
+        match self {
+            MergeRowOrder::Stack(stack_row_order) => stack_row_order.num_rows(),
+            MergeRowOrder::Shuffled(complex_mapping) => complex_mapping.num_rows(),
+            MergeRowOrder::Disjoint => unimplemented!(),
+        }
+    }
+}
+
 pub struct StackMergeOrder {
     // This does not start at 0. The first row is the number of
     // rows in the first columnar.
@@ -45,41 +82,6 @@ impl StackMergeOrder {
 
     pub fn columnar_range(&self, columnar_id: usize) -> Range<RowId> {
         self.offset(columnar_id)..self.offset(columnar_id + 1)
-    }
-}
-
-pub enum MergeRowOrder {
-    /// Columnar tables are simply stacked one above the other.
-    /// If the i-th columnar_readers has n_rows_i rows, then
-    /// in the resulting columnar,
-    /// rows [r0..n_row_0) contains the row of `columnar_readers[0]`, in ordder
-    /// rows [n_row_0..n_row_0 + n_row_1 contains the row of `columnar_readers[1]`, in order.
-    /// ..
-    /// No documents is deleted.
-    Stack(StackMergeOrder),
-    /// Some more complex mapping, that may interleaves rows from the different readers and
-    /// drop rows, or do both.
-    Shuffled(ShuffleMergeOrder),
-}
-
-impl From<StackMergeOrder> for MergeRowOrder {
-    fn from(stack_merge_order: StackMergeOrder) -> MergeRowOrder {
-        MergeRowOrder::Stack(stack_merge_order)
-    }
-}
-
-impl From<ShuffleMergeOrder> for MergeRowOrder {
-    fn from(shuffle_merge_order: ShuffleMergeOrder) -> MergeRowOrder {
-        MergeRowOrder::Shuffled(shuffle_merge_order)
-    }
-}
-
-impl MergeRowOrder {
-    pub fn num_rows(&self) -> RowId {
-        match self {
-            MergeRowOrder::Stack(stack_row_order) => stack_row_order.num_rows(),
-            MergeRowOrder::Shuffled(complex_mapping) => complex_mapping.num_rows(),
-        }
     }
 }
 
@@ -127,3 +129,5 @@ impl ShuffleMergeOrder {
         self.new_row_id_to_old_row_id.iter().copied()
     }
 }
+
+pub struct DisjointRowMergeOrder {}

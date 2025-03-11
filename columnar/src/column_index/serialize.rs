@@ -50,13 +50,16 @@ pub fn serialize_column_index(
     let cardinality = column_index.get_cardinality().to_code();
     output.write_all(&[cardinality])?;
     match column_index {
-        SerializableColumnIndex::Full => {}
+        SerializableColumnIndex::Full => {
+            unimplemented!()
+        }
         SerializableColumnIndex::Optional(SerializableOptionalIndex {
             non_null_row_ids,
             num_rows,
         }) => serialize_optional_index(non_null_row_ids.as_ref(), num_rows, &mut output)?,
         SerializableColumnIndex::Multivalued(multivalued_index) => {
-            serialize_multivalued_index(&multivalued_index, &mut output)?
+            unimplemented!()
+            // serialize_multivalued_index(&multivalued_index, &mut output)?
         }
     }
     let column_index_num_bytes = output.written_bytes() as u32;

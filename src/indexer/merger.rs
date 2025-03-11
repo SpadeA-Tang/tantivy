@@ -427,6 +427,7 @@ impl IndexMerger {
 
             field_serializer.new_term(term_bytes, total_doc_freq, has_term_freq)?;
 
+            let mut doc_ids = vec![];
             // We can now serialize this postings, by pushing each document to the
             // postings serializer.
             for (segment_ord, mut segment_postings) in
@@ -437,27 +438,31 @@ impl IndexMerger {
                 let mut doc = segment_postings.doc();
                 while doc != TERMINATED {
                     // deleted doc are skipped as they do not have a `remapped_doc_id`.
-                    if let Some(remapped_doc_id) = old_to_new_doc_id[doc as usize] {
-                        // we make sure to only write the term if
-                        // there is at least one document.
-                        let term_freq = if has_term_freq {
-                            segment_postings.positions(&mut positions_buffer);
-                            segment_postings.term_freq()
-                        } else {
-                            // The positions_buffer may contain positions from the previous term
-                            // Existence of positions depend on the value type in JSON fields.
-                            // https://github.com/quickwit-oss/tantivy/issues/2283
-                            positions_buffer.clear();
-                            0u32
-                        };
-
-                        let delta_positions = delta_computer.compute_delta(&positions_buffer);
-                        field_serializer.write_doc(remapped_doc_id, term_freq, delta_positions);
-                    }
+                    // we make sure to only write the term if
+                    // there is at least one document.
+                    let term_freq = if has_term_freq {
+                        segment_postings.positions(&mut positions_buffer);
+                        segment_postings.term_freq()
+                    } else {
+                        // The positions_buffer may contain positions from the previous term
+                        // Existence of positions depend on the value type in JSON fields.
+                        // https://github.com/quickwit-oss/tantivy/issues/2283
+                        positions_buffer.clear();
+                        0u32
+                    };
+                    let delta_positions = delta_computer.compute_delta(&positions_buffer);
+                    doc_ids.push((term_freq, doc, delta_positions.to_vec()));
+                    // field_serializer.write_doc(remapped_doc_id, term_freq, delta_positions);
 
                     doc = segment_postings.advance();
                 }
             }
+
+            doc_ids.sort();
+            for (term_freq, doc_id, delta_positions) in doc_ids {
+                field_serializer.write_doc(doc_id, term_freq, &delta_positions);
+            }
+
             // closing the term.
             field_serializer.close_term()?;
         }
@@ -526,11 +531,21 @@ impl IndexMerger {
     /// # Returns
     /// The number of documents in the resulting segment.
     pub fn write(&self, mut serializer: SegmentSerializer) -> crate::Result<u32> {
+        #[cfg(debug_assertions)]
+        println!("Merge Write to {}", serializer.segment().meta().id());
+        #[cfg(debug_assertions)]
+        for reader in &self.readers {
+            println!(
+                "  Segment id {}, num_rows {}",
+                reader.segment_id(),
+                reader.num_docs()
+            );
+        }
         let doc_id_mapping = self.get_doc_id_from_concatenated_data()?;
         debug!("write-fieldnorms");
-        if let Some(fieldnorms_serializer) = serializer.extract_fieldnorms_serializer() {
-            self.write_fieldnorms(fieldnorms_serializer, &doc_id_mapping)?;
-        }
+        // if let Some(fieldnorms_serializer) = serializer.extract_fieldnorms_serializer() {
+        //     self.write_fieldnorms(fieldnorms_serializer, &doc_id_mapping)?;
+        // }
         debug!("write-postings");
         let fieldnorm_data = serializer
             .segment()

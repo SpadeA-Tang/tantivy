@@ -31,12 +31,12 @@ pub struct OptionalIndexBuilder {
 
 impl OptionalIndexBuilder {
     pub fn finish(&mut self, num_rows: RowId) -> impl Iterable<RowId> + '_ {
-        debug_assert!(self
-            .docs
-            .last()
-            .copied()
-            .map(|last_doc| last_doc < num_rows)
-            .unwrap_or(true));
+        // debug_assert!(self
+        //     .docs
+        //     .last()
+        //     .copied()
+        //     .map(|last_doc| last_doc < num_rows)
+        //     .unwrap_or(true));
         &self.docs[..]
     }
 

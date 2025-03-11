@@ -5,6 +5,7 @@ mod set;
 mod set_block;
 
 use common::{BinarySerializable, OwnedBytes, VInt};
+use itertools::Itertools;
 pub use set::{SelectCursor, Set, SetCodec};
 use set_block::{
     DenseBlock, DenseBlockCodec, SparseBlock, SparseBlockCodec, DENSE_BLOCK_NUM_BYTES,
@@ -97,6 +98,7 @@ impl std::fmt::Debug for OptionalIndex {
         f.debug_struct("OptionalIndex")
             .field("num_rows", &self.num_rows)
             .field("num_non_null_rows", &self.num_non_null_rows)
+            .field("block_metas", &self.block_metas)
             .finish_non_exhaustive()
     }
 }
@@ -397,7 +399,9 @@ pub fn serialize_optional_index<W: io::Write>(
     let mut current_block_id = row_addr.block_id;
     current_block.push(row_addr.in_block_row_id);
 
+    let mut doc_ids = vec![];
     for idx in rows_it {
+        doc_ids.push(idx);
         let value_addr = row_addr_from_row_id(idx);
         if current_block_id != value_addr.block_id {
             serialize_optional_index_block(&current_block[..], output)?;
@@ -410,6 +414,7 @@ pub fn serialize_optional_index<W: io::Write>(
         }
         current_block.push(value_addr.in_block_row_id);
     }
+    assert!(doc_ids.is_sorted());
 
     // handle last block
     serialize_optional_index_block(&current_block[..], output)?;
@@ -418,6 +423,13 @@ pub fn serialize_optional_index<W: io::Write>(
         block_id: current_block_id,
         num_non_null_rows: current_block.len() as u32,
     });
+
+    #[cfg(debug_assertions)]
+    println!(
+        "-- serialize_optional_index, num rows {:?}, block len {}",
+        num_rows,
+        block_metadata.len(),
+    );
 
     for block in &block_metadata {
         output.write_all(&block.to_bytes())?;
@@ -504,13 +516,22 @@ fn deserialize_optional_index_block_metadatas(
         start_byte_offset += block_variant.num_bytes_in_block();
         non_null_rows_before_block += num_non_null_rows;
     }
-    block_metas.resize(
-        num_rows.div_ceil(ELEMENTS_PER_BLOCK) as usize,
-        BlockMeta {
-            non_null_rows_before_block,
-            start_byte_offset,
-            block_variant: BlockVariant::empty(),
-        },
+
+    // todo: why this is needed?
+    // block_metas.resize(
+    //     num_rows.div_ceil(ELEMENTS_PER_BLOCK) as usize,
+    //     BlockMeta {
+    //         non_null_rows_before_block,
+    //         start_byte_offset,
+    //         block_variant: BlockVariant::empty(),
+    //     },
+    // );
+
+    assert!(
+        non_null_rows_before_block <= num_rows,
+        "num_rows {}, non_null_rows_before_block {}",
+        num_rows,
+        non_null_rows_before_block
     );
     (block_metas.into_boxed_slice(), non_null_rows_before_block)
 }
@@ -520,6 +541,13 @@ pub fn open_optional_index(bytes: OwnedBytes) -> io::Result<OptionalIndex> {
     let num_non_empty_block_bytes =
         u16::from_le_bytes(num_non_empty_blocks_bytes.as_slice().try_into().unwrap());
     let num_rows = VInt::deserialize_u64(&mut bytes)? as u32;
+
+    #[cfg(debug_assertions)]
+    println!(
+        "open_optional_index, num rows {:?}, num_non_empty_blocks_bytes {}",
+        num_rows,
+        num_non_empty_blocks_bytes.len()
+    );
     let block_metas_num_bytes =
         num_non_empty_block_bytes as usize * SERIALIZED_BLOCK_META_NUM_BYTES;
     let (block_data, block_metas) = bytes.rsplit(block_metas_num_bytes);

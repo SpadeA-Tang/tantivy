@@ -10,7 +10,7 @@ mod serialize;
 
 use std::ops::Range;
 
-pub use merge::merge_column_index;
+pub use merge::{merge_column_index, DisjointColumnValues};
 pub(crate) use multivalued_index::SerializableMultivalueIndex;
 pub use optional_index::{OptionalIndex, Set};
 pub use serialize::{

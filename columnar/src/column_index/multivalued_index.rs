@@ -22,25 +22,26 @@ pub fn serialize_multivalued_index(
     multivalued_index: &SerializableMultivalueIndex,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let SerializableMultivalueIndex {
-        doc_ids_with_values,
-        start_offsets,
-    } = multivalued_index;
-    let mut count_writer = CountingWriter::wrap(output);
-    let SerializableOptionalIndex {
-        non_null_row_ids,
-        num_rows,
-    } = doc_ids_with_values;
-    serialize_optional_index(&**non_null_row_ids, *num_rows, &mut count_writer)?;
-    let optional_len = count_writer.written_bytes() as u32;
-    let output = count_writer.finish();
-    serialize_u64_based_column_values(
-        &**start_offsets,
-        &[CodecType::Bitpacked, CodecType::Linear],
-        output,
-    )?;
-    output.write_all(&optional_len.to_le_bytes())?;
-    Ok(())
+    unimplemented!()
+    // let SerializableMultivalueIndex {
+    //     doc_ids_with_values,
+    //     start_offsets,
+    // } = multivalued_index;
+    // let mut count_writer = CountingWriter::wrap(output);
+    // let SerializableOptionalIndex {
+    //     non_null_row_ids,
+    //     num_rows,
+    // } = doc_ids_with_values;
+    // serialize_optional_index(&**non_null_row_ids, *num_rows, &mut count_writer)?;
+    // let optional_len = count_writer.written_bytes() as u32;
+    // let output = count_writer.finish();
+    // serialize_u64_based_column_values(
+    //     &**start_offsets,
+    //     &[CodecType::Bitpacked, CodecType::Linear],
+    //     output,
+    // )?;
+    // output.write_all(&optional_len.to_le_bytes())?;
+    // Ok(())
 }
 
 pub fn open_multivalued_index(
@@ -166,27 +167,28 @@ impl std::fmt::Debug for MultiValueIndex {
 
 impl MultiValueIndex {
     pub fn for_test(start_offsets: &[RowId]) -> MultiValueIndex {
-        assert!(!start_offsets.is_empty());
-        assert_eq!(start_offsets[0], 0);
-        let mut doc_with_values = Vec::new();
-        let mut compact_start_offsets: Vec<u32> = vec![0];
-        for doc in 0..start_offsets.len() - 1 {
-            if start_offsets[doc] < start_offsets[doc + 1] {
-                doc_with_values.push(doc as RowId);
-                compact_start_offsets.push(start_offsets[doc + 1]);
-            }
-        }
-        let serializable_multivalued_index = SerializableMultivalueIndex {
-            doc_ids_with_values: SerializableOptionalIndex {
-                non_null_row_ids: Box::new(&doc_with_values[..]),
-                num_rows: start_offsets.len() as u32 - 1,
-            },
-            start_offsets: Box::new(&compact_start_offsets[..]),
-        };
-        let mut buffer = Vec::new();
-        serialize_multivalued_index(&serializable_multivalued_index, &mut buffer).unwrap();
-        let bytes = OwnedBytes::new(buffer);
-        open_multivalued_index(bytes, Version::V2).unwrap()
+        unimplemented!()
+        // assert!(!start_offsets.is_empty());
+        // assert_eq!(start_offsets[0], 0);
+        // let mut doc_with_values = Vec::new();
+        // let mut compact_start_offsets: Vec<u32> = vec![0];
+        // for doc in 0..start_offsets.len() - 1 {
+        //     if start_offsets[doc] < start_offsets[doc + 1] {
+        //         doc_with_values.push(doc as RowId);
+        //         compact_start_offsets.push(start_offsets[doc + 1]);
+        //     }
+        // }
+        // let serializable_multivalued_index = SerializableMultivalueIndex {
+        //     doc_ids_with_values: SerializableOptionalIndex {
+        //         non_null_row_ids: Box::new(&doc_with_values[..]),
+        //         num_rows: start_offsets.len() as u32 - 1,
+        //     },
+        //     start_offsets: Box::new(&compact_start_offsets[..]),
+        // };
+        // let mut buffer = Vec::new();
+        // serialize_multivalued_index(&serializable_multivalued_index, &mut buffer).unwrap();
+        // let bytes = OwnedBytes::new(buffer);
+        // open_multivalued_index(bytes, Version::V2).unwrap()
     }
 
     pub fn get_start_index_column(&self) -> &Arc<dyn crate::ColumnValues<RowId>> {

@@ -61,6 +61,24 @@ pub struct ColumnarWriter {
 }
 
 impl ColumnarWriter {
+    pub fn print_mem_usage(&self) {
+        println!(
+            "numerical_field_hash_map {}, bool_field_hash_map {}, bytes_field_hash_map {}, \
+             str_field_hash_map {}, ip_addr_field_hash_map {}, datetime_field_hash_map {}, \
+             dictionaries {}",
+            self.numerical_field_hash_map.mem_usage(),
+            self.bool_field_hash_map.mem_usage(),
+            self.bytes_field_hash_map.mem_usage(),
+            self.str_field_hash_map.mem_usage(),
+            self.ip_addr_field_hash_map.mem_usage(),
+            self.datetime_field_hash_map.mem_usage(),
+            self.dictionaries
+                .iter()
+                .map(|dict| dict.mem_usage())
+                .sum::<usize>()
+        );
+    }
+
     pub fn mem_usage(&self) -> usize {
         self.arena.mem_usage()
             + self.numerical_field_hash_map.mem_usage()
@@ -593,12 +611,13 @@ fn send_to_serialize_column_mappable_to_u64(
     values.clear();
     let serializable_column_index = match cardinality {
         Cardinality::Full => {
-            consume_operation_iterator(
-                op_iterator,
-                value_index_builders.borrow_required_index_builder(),
-                values,
-            );
-            SerializableColumnIndex::Full
+            unimplemented!()
+            // consume_operation_iterator(
+            //     op_iterator,
+            //     value_index_builders.borrow_required_index_builder(),
+            //     values,
+            // );
+            // SerializableColumnIndex::Full
         }
         Cardinality::Optional => {
             let optional_index_builder = value_index_builders.borrow_optional_index_builder();
@@ -610,16 +629,18 @@ fn send_to_serialize_column_mappable_to_u64(
             })
         }
         Cardinality::Multivalued => {
-            let multivalued_index_builder = value_index_builders.borrow_multivalued_index_builder();
-            consume_operation_iterator(op_iterator, multivalued_index_builder, values);
-            let serializable_multivalued_index = multivalued_index_builder.finish(num_rows);
-            if sort_values_within_row {
-                sort_values_within_row_in_place(
-                    serializable_multivalued_index.start_offsets.boxed_iter(),
-                    values,
-                );
-            }
-            SerializableColumnIndex::Multivalued(serializable_multivalued_index)
+            unimplemented!()
+            // let multivalued_index_builder =
+            // value_index_builders.borrow_multivalued_index_builder();
+            // consume_operation_iterator(op_iterator, multivalued_index_builder, values);
+            // let serializable_multivalued_index = multivalued_index_builder.finish(num_rows);
+            // if sort_values_within_row {
+            //     sort_values_within_row_in_place(
+            //         serializable_multivalued_index.start_offsets.boxed_iter(),
+            //         values,
+            //     );
+            // }
+            // SerializableColumnIndex::Multivalued(serializable_multivalued_index)
         }
     };
     crate::column::serialize_column_mappable_to_u64(

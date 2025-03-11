@@ -87,9 +87,9 @@ impl From<InvalidData> for io::Error {
 pub enum Cardinality {
     /// All documents contain exactly one value.
     /// `Full` is the default for auto-detecting the Cardinality, since it is the most strict.
-    #[default]
     Full = 0,
     /// All documents contain at most one value.
+    #[default]
     Optional = 1,
     /// All documents may contain any number of values.
     Multivalued = 2,

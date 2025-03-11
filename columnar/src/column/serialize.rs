@@ -36,6 +36,11 @@ pub fn serialize_column_mappable_to_u64<T: MonotonicallyMappableToU64>(
         &[CodecType::Bitpacked, CodecType::BlockwiseLinear],
         output,
     )?;
+    #[cfg(debug_assertions)]
+    println!(
+        "serialize_column_mappable_to_u64: column index bytes {}",
+        column_index_num_bytes
+    );
     output.write_all(&column_index_num_bytes.to_le_bytes())?;
     Ok(())
 }
@@ -50,6 +55,11 @@ pub fn open_column_u64<T: MonotonicallyMappableToU64>(
             .as_slice()
             .try_into()
             .unwrap(),
+    );
+    #[cfg(debug_assertions)]
+    println!(
+        "open_column_u64: column index bytes {:?}",
+        column_index_num_bytes
     );
     let (column_index_data, column_values_data) = body.split(column_index_num_bytes as usize);
     let column_index = crate::column_index::open_column_index(column_index_data, format_version)?;

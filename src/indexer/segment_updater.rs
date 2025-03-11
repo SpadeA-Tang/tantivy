@@ -87,11 +87,11 @@ fn merge(
     mut segment_entries: Vec<SegmentEntry>,
     target_opstamp: Opstamp,
 ) -> crate::Result<Option<SegmentEntry>> {
-    let num_docs = segment_entries
+    let num_docs_before = segment_entries
         .iter()
         .map(|segment| segment.meta().num_docs() as u64)
         .sum::<u64>();
-    if num_docs == 0 {
+    if num_docs_before == 0 {
         return Ok(None);
     }
 
@@ -118,6 +118,11 @@ fn merge(
     let segment_serializer = SegmentSerializer::for_segment(merged_segment.clone())?;
 
     let num_docs = merger.write(segment_serializer)?;
+    assert_eq!(
+        num_docs, num_docs_before as u32,
+        "The number of documents should not change, but it changed from {} to {}",
+        num_docs_before, num_docs
+    );
 
     let merged_segment_id = merged_segment.id();
 

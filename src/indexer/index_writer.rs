@@ -199,6 +199,7 @@ async fn index_documents<D: Document>(
             }
             let mem_usage = segment_writer.mem_usage();
             if mem_usage >= memory_budget - MARGIN_IN_BYTES {
+                segment_writer.print_mem_usage();
                 info!(
                     "Buffer limit reached, flushing segment with maxdoc={}.",
                     segment_writer.max_doc()
@@ -739,9 +740,13 @@ impl<D: Document> IndexWriter<D> {
     /// The opstamp is an increasing `u64` that can
     /// be used by the client to align commits with its own
     /// document queue.
-    pub fn add_document(&self, document: D) -> crate::Result<Opstamp> {
+    pub fn add_document(&self, doc_id: u32, document: D) -> crate::Result<Opstamp> {
         let opstamp = self.stamper.stamp();
-        self.send_add_documents_batch(smallvec![AddOperation { opstamp, document }])?;
+        self.send_add_documents_batch(smallvec![AddOperation {
+            opstamp,
+            document,
+            doc_id
+        }])?;
         Ok(opstamp)
     }
 
@@ -800,8 +805,12 @@ impl<D: Document> IndexWriter<D> {
                     };
                     self.delete_queue.push(delete_operation);
                 }
-                UserOperation::Add(document) => {
-                    let add_operation = AddOperation { opstamp, document };
+                UserOperation::Add((doc_id, document)) => {
+                    let add_operation = AddOperation {
+                        opstamp,
+                        document,
+                        doc_id,
+                    };
                     adds.push(add_operation);
                 }
             }

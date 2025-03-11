@@ -50,14 +50,14 @@ impl FieldNormsWriter {
             .map(|buf| buf.capacity())
             .sum()
     }
-    /// Ensure that all documents in 0..max_doc have a byte associated with them
+    /// Ensure that all documents in 0..doc_count have a byte associated with them
     /// in each of the fieldnorm vectors.
     ///
     /// Will extend with 0-bytes for documents that have not been seen.
-    pub fn fill_up_to_max_doc(&mut self, max_doc: DocId) {
+    pub fn fill_up_to_max_doc(&mut self, doc_count: u32) {
         for fieldnorms_buffer_opt in self.fieldnorms_buffers.iter_mut() {
             if let Some(fieldnorms_buffer) = fieldnorms_buffer_opt.as_mut() {
-                fieldnorms_buffer.resize(max_doc as usize, 0u8);
+                fieldnorms_buffer.resize(doc_count as usize, 0u8);
             }
         }
     }

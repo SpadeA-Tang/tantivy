@@ -1,6 +1,9 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use crate::column_index::DisjointColumnValues;
 use crate::iterable::Iterable;
 use crate::{ColumnIndex, ColumnValues, MergeRowOrder};
 
@@ -35,6 +38,50 @@ impl<T: Copy + PartialOrd + Debug + 'static> Iterable<T> for MergedColumnValues<
                             .map(|val| column_values.get_val(val))
                     }),
             ),
+            MergeRowOrder::Disjoint => {
+                let mut iters = self
+                    .column_indexes
+                    .iter()
+                    .map(|index| {
+                        let ColumnIndex::Optional(optional_index) = index else {
+                            unimplemented!()
+                        };
+                        optional_index.iter_rows()
+                    })
+                    .collect::<Vec<_>>();
+
+                let column_values = self.column_values.as_ref().clone();
+                let column_indexes = self.column_indexes.as_ref().clone();
+
+                let mut heap = BinaryHeap::new();
+
+                for (idx, iter) in iters.iter_mut().enumerate() {
+                    if let Some(val) = iter.next() {
+                        heap.push(Reverse((val, idx)));
+                    }
+                }
+
+                Box::new(std::iter::from_fn(move || {
+                    if let Some(Reverse((row_id, ord))) = heap.pop() {
+                        let iter = &mut iters[ord];
+                        if let Some(val) = iter.next() {
+                            heap.push(Reverse((val, ord)));
+                        }
+
+                        let column_index = &column_indexes[ord];
+                        let mut values = column_index
+                            .value_row_ids(row_id)
+                            .map(|value_row_id| {
+                                column_values[ord].as_ref().unwrap().get_val(value_row_id)
+                            })
+                            .collect::<Vec<_>>();
+                        assert!(values.len() == 1);
+                        values.pop()
+                    } else {
+                        None
+                    }
+                }))
+            }
         }
     }
 }

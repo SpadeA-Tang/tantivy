@@ -46,6 +46,7 @@ impl Iterable for RemappedTermOrdinalsValues<'_> {
             MergeRowOrder::Shuffled(shuffle_merge_order) => {
                 self.boxed_iter_shuffled(shuffle_merge_order)
             }
+            MergeRowOrder::Disjoint => unimplemented!(),
         }
     }
 }
@@ -185,6 +186,7 @@ fn serialize_merged_dict(
             }
             sstable_builder.finish()?;
         }
+        MergeRowOrder::Disjoint => unimplemented!(),
     }
     Ok(term_ord_mapping)
 }

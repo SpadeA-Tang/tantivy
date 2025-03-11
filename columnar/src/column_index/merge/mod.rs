@@ -1,7 +1,10 @@
+mod disjoint;
 mod shuffled;
 mod stacked;
 
 use common::ReadOnlyBitSet;
+use disjoint::merge_column_index_disjoint;
+pub use disjoint::DisjointColumnValues;
 use shuffled::merge_column_index_shuffled;
 use stacked::merge_column_index_stacked;
 
@@ -67,6 +70,7 @@ fn detect_cardinality(
             }
             merged_cardinality
         }
+        MergeRowOrder::Disjoint => Cardinality::Optional,
     }
 }
 
@@ -84,6 +88,7 @@ pub fn merge_column_index<'a>(
         MergeRowOrder::Shuffled(complex_merge_order) => {
             merge_column_index_shuffled(columns, cardinality_after_merge, complex_merge_order)
         }
+        MergeRowOrder::Disjoint => merge_column_index_disjoint(columns, cardinality_after_merge),
     }
 }
 
