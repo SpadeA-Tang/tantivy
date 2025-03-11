@@ -121,7 +121,7 @@ impl SegmentWriter {
     ///
     /// Finalize consumes the `SegmentWriter`, so that it cannot
     /// be used afterwards.
-    pub fn finalize(mut self) -> crate::Result<Vec<u64>> {
+    pub async fn finalize(mut self) -> crate::Result<Vec<u64>> {
         self.fieldnorms_writer.fill_up_to_max_doc(self.doc_count);
         remap_and_write(
             self.schema,
@@ -130,7 +130,8 @@ impl SegmentWriter {
             self.fast_field_writers,
             &self.fieldnorms_writer,
             self.segment_serializer,
-        )?;
+        )
+        .await?;
         Ok(self.doc_opstamps)
     }
 
@@ -353,7 +354,7 @@ impl SegmentWriter {
     /// Indexes a new document
     ///
     /// As a user, you should rather use `IndexWriter`'s add_document.
-    pub fn add_document<D: Document>(
+    pub async fn add_document<D: Document>(
         &mut self,
         add_operation: AddOperation<D>,
     ) -> crate::Result<()> {
@@ -366,7 +367,7 @@ impl SegmentWriter {
         self.fast_field_writers.add_document(doc_id, &document)?;
         self.index_document(doc_id, &document)?;
         let doc_writer = self.segment_serializer.get_store_writer();
-        doc_writer.store(&document, &self.schema)?;
+        doc_writer.store(&document, &self.schema).await?;
         self.doc_count += 1;
         Ok(())
     }
@@ -397,7 +398,7 @@ impl SegmentWriter {
 /// to the `SegmentSerializer`.
 ///
 /// `doc_id_map` is used to map to the new doc_id order.
-fn remap_and_write(
+async fn remap_and_write(
     schema: Schema,
     per_field_postings_writers: &PerFieldPostingsWriter,
     ctx: IndexingContext,
@@ -431,7 +432,7 @@ fn remap_and_write(
     fast_field_writers.serialize(serializer.get_fast_field_write())?;
 
     debug!("serializer-close");
-    serializer.close()?;
+    serializer.close().await?;
 
     Ok(())
 }
@@ -473,8 +474,8 @@ mod tests {
         assert_eq!(compute_initial_table_size(4_000_000_000).unwrap(), 1 << 19);
     }
 
-    #[test]
-    fn test_prepare_for_store() {
+    #[tokio::test]
+    async fn test_prepare_for_store() {
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field("title", TEXT | STORED);
         let schema = schema_builder.build();
@@ -498,8 +499,8 @@ mod tests {
         let store_wrt = directory.open_write(path).unwrap();
 
         let mut store_writer = StoreWriter::new(store_wrt, Compressor::None, 0, false).unwrap();
-        store_writer.store(&doc, &schema).unwrap();
-        store_writer.close().unwrap();
+        store_writer.store(&doc, &schema).await.unwrap();
+        store_writer.close().await.unwrap();
 
         let reader = StoreReader::open(directory.open_read(path).unwrap(), 0).unwrap();
         let doc = reader.get::<TantivyDocument>(0).unwrap();
