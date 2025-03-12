@@ -65,7 +65,6 @@ impl<T: PartialOrd + Copy + Debug + Send + Sync + 'static> Column<T> {
     pub fn num_docs(&self) -> RowId {
         match &self.index {
             ColumnIndex::Empty { num_docs } => *num_docs,
-            ColumnIndex::Full => self.values.num_vals(),
             ColumnIndex::Optional(optional_index) => optional_index.num_docs(),
             ColumnIndex::Multivalued(col_index) => {
                 // The multivalued index contains all value start row_id,
@@ -93,7 +92,6 @@ impl<T: PartialOrd + Copy + Debug + Send + Sync + 'static> Column<T> {
     pub fn first_vals(&self, docids: &[DocId], output: &mut [Option<T>]) {
         match &self.index {
             ColumnIndex::Empty { .. } => {}
-            ColumnIndex::Full => self.values.get_vals_opt(docids, output),
             ColumnIndex::Optional(optional_index) => {
                 for (i, docid) in docids.iter().enumerate() {
                     output[i] = optional_index
@@ -211,7 +209,6 @@ impl<T: PartialOrd + Debug + Send + Sync + Copy + 'static> ColumnValues<T>
     fn num_vals(&self) -> u32 {
         match &self.column.index {
             ColumnIndex::Empty { .. } => 0u32,
-            ColumnIndex::Full => self.column.values.num_vals(),
             ColumnIndex::Optional(optional_idx) => optional_idx.num_docs(),
             ColumnIndex::Multivalued(multivalue_idx) => multivalue_idx.num_docs(),
         }

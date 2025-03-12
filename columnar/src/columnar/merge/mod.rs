@@ -412,16 +412,11 @@ fn is_empty_after_merge(
         return true;
     }
     match merge_row_order {
-        MergeRowOrder::Stack(_) => {
-            // If we are stacking the columnar, no rows are being deleted.
-            false
-        }
         MergeRowOrder::Shuffled(shuffled) => {
             if let Some(alive_bitset) = &shuffled.alive_bitsets[columnar_ord] {
                 let column_index = column.column_index();
                 match column_index {
                     ColumnIndex::Empty { .. } => true,
-                    ColumnIndex::Full => alive_bitset.len() == 0,
                     ColumnIndex::Optional(optional_index) => {
                         for doc in optional_index.iter_rows() {
                             if alive_bitset.contains(doc) {
@@ -445,7 +440,6 @@ fn is_empty_after_merge(
                 false
             }
         }
-        MergeRowOrder::Disjoint => false,
     }
 }
 

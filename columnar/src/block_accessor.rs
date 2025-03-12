@@ -15,26 +15,17 @@ impl<T: PartialOrd + Copy + std::fmt::Debug + Send + Sync + 'static + Default>
 {
     #[inline]
     pub fn fetch_block<'a>(&'a mut self, docs: &'a [u32], accessor: &Column<T>) {
-        if accessor.index.get_cardinality().is_full() {
-            self.val_cache.resize(docs.len(), T::default());
-            accessor.values.get_vals(docs, &mut self.val_cache);
-        } else {
-            self.docid_cache.clear();
-            self.row_id_cache.clear();
-            accessor.row_ids_for_docs(docs, &mut self.docid_cache, &mut self.row_id_cache);
-            self.val_cache.resize(self.row_id_cache.len(), T::default());
-            accessor
-                .values
-                .get_vals(&self.row_id_cache, &mut self.val_cache);
-        }
+        self.docid_cache.clear();
+        self.row_id_cache.clear();
+        accessor.row_ids_for_docs(docs, &mut self.docid_cache, &mut self.row_id_cache);
+        self.val_cache.resize(self.row_id_cache.len(), T::default());
+        accessor
+            .values
+            .get_vals(&self.row_id_cache, &mut self.val_cache);
     }
     #[inline]
     pub fn fetch_block_with_missing(&mut self, docs: &[u32], accessor: &Column<T>, missing: T) {
         self.fetch_block(docs, accessor);
-        // no missing values
-        if accessor.index.get_cardinality().is_full() {
-            return;
-        }
 
         // We can compare docid_cache length with docs to find missing docs
         // For multi value columns we can't rely on the length and always need to scan
@@ -67,14 +58,10 @@ impl<T: PartialOrd + Copy + std::fmt::Debug + Send + Sync + 'static + Default>
         docs: &'a [u32],
         accessor: &Column<T>,
     ) -> impl Iterator<Item = (DocId, T)> + 'a {
-        if accessor.index.get_cardinality().is_full() {
-            docs.iter().cloned().zip(self.val_cache.iter().cloned())
-        } else {
-            self.docid_cache
-                .iter()
-                .cloned()
-                .zip(self.val_cache.iter().cloned())
-        }
+        self.docid_cache
+            .iter()
+            .cloned()
+            .zip(self.val_cache.iter().cloned())
     }
 }
 

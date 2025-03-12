@@ -126,7 +126,7 @@ impl<'a> FieldSerializer<'a> {
         let term_dictionary_builder = TermDictionaryBuilder::create(term_dictionary_write)?;
         let average_fieldnorm = fieldnorm_reader
             .as_ref()
-            .map(|ff_reader| (total_num_tokens as Score / ff_reader.num_docs() as Score))
+            .map(|ff_reader| (total_num_tokens as Score / ff_reader.max_doc_id_plus_one() as Score))
             .unwrap_or(0.0);
         let postings_serializer = PostingsSerializer::new(
             postings_write,
@@ -346,7 +346,7 @@ impl<W: Write> PostingsSerializer<W> {
 
         let num_docs_in_segment: u64 =
             if let Some(fieldnorm_reader) = self.fieldnorm_reader.as_ref() {
-                fieldnorm_reader.num_docs() as u64
+                fieldnorm_reader.max_doc_id_plus_one() as u64
             } else {
                 return;
             };

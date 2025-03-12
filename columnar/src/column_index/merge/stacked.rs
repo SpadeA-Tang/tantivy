@@ -16,7 +16,6 @@ pub fn merge_column_index_stacked<'a>(
     stack_merge_order: &'a StackMergeOrder,
 ) -> SerializableColumnIndex<'a> {
     match cardinality_after_merge {
-        Cardinality::Full => SerializableColumnIndex::Full,
         Cardinality::Optional => SerializableColumnIndex::Optional(SerializableOptionalIndex {
             non_null_row_ids: Box::new(StackedOptionalIndex {
                 columns,
@@ -54,7 +53,6 @@ fn get_doc_ids_with_values<'a>(
 ) -> Box<dyn Iterator<Item = u32> + 'a> {
     match column_index {
         ColumnIndex::Empty { .. } => Box::new(0..0),
-        ColumnIndex::Full => Box::new(doc_range),
         ColumnIndex::Optional(optional_index) => Box::new(
             optional_index
                 .iter_rows()
@@ -107,7 +105,6 @@ fn get_num_values_iterator<'a>(
 ) -> Box<dyn Iterator<Item = u32> + 'a> {
     match column_index {
         ColumnIndex::Empty { .. } => Box::new(std::iter::empty()),
-        ColumnIndex::Full => Box::new(std::iter::repeat(1u32).take(num_docs as usize)),
         ColumnIndex::Optional(optional_index) => {
             Box::new(std::iter::repeat(1u32).take(optional_index.num_non_nulls() as usize))
         }
@@ -176,8 +173,6 @@ impl<'a> Iterable<RowId> for StackedOptionalIndex<'a> {
                 .flat_map(|(columnar_id, column_index_opt)| {
                     let columnar_row_range = self.stack_merge_order.columnar_range(columnar_id);
                     let rows_it: Box<dyn Iterator<Item = RowId>> = match column_index_opt {
-                        // ColumnIndex::Full => Box::new(columnar_row_range),
-                        ColumnIndex::Full => unimplemented!(),
                         ColumnIndex::Optional(optional_index) => Box::new(
                             optional_index
                                 .iter_rows()

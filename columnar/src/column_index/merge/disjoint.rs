@@ -11,7 +11,7 @@ pub fn merge_column_index_disjoint<'a>(
     cardinality_after_merge: Cardinality,
 ) -> SerializableColumnIndex<'a> {
     match cardinality_after_merge {
-        Cardinality::Full | Cardinality::Multivalued => unimplemented!(),
+        Cardinality::Multivalued => unimplemented!(),
         Cardinality::Optional => {
             let num_rows = column_indexes
                 .iter()

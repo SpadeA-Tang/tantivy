@@ -85,9 +85,6 @@ impl From<InvalidData> for io::Error {
 #[derive(Clone, Copy, Hash, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Cardinality {
-    /// All documents contain exactly one value.
-    /// `Full` is the default for auto-detecting the Cardinality, since it is the most strict.
-    Full = 0,
     /// All documents contain at most one value.
     #[default]
     Optional = 1,
@@ -98,7 +95,6 @@ pub enum Cardinality {
 impl Display for Cardinality {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let short_str = match self {
-            Cardinality::Full => "full",
             Cardinality::Optional => "opt",
             Cardinality::Multivalued => "mult",
         };
@@ -113,15 +109,11 @@ impl Cardinality {
     pub fn is_multivalue(&self) -> bool {
         matches!(self, Cardinality::Multivalued)
     }
-    pub fn is_full(&self) -> bool {
-        matches!(self, Cardinality::Full)
-    }
     pub(crate) fn to_code(self) -> u8 {
         self as u8
     }
     pub(crate) fn try_from_code(code: u8) -> Result<Cardinality, InvalidData> {
         match code {
-            0 => Ok(Cardinality::Full),
             1 => Ok(Cardinality::Optional),
             2 => Ok(Cardinality::Multivalued),
             _ => Err(InvalidData),

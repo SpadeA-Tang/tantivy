@@ -12,7 +12,6 @@ pub fn merge_column_index_shuffled<'a>(
     shuffle_merge_order: &'a ShuffleMergeOrder,
 ) -> SerializableColumnIndex<'a> {
     match cardinality_after_merge {
-        Cardinality::Full => SerializableColumnIndex::Full,
         Cardinality::Optional => {
             let non_null_row_ids =
                 merge_column_index_shuffled_optional(column_indexes, shuffle_merge_order);
@@ -99,7 +98,6 @@ fn iter_num_values<'a>(
         let column_index = &column_indexes[row_addr.segment_ord as usize];
         match column_index {
             ColumnIndex::Empty { .. } => 0u32,
-            ColumnIndex::Full => 1,
             ColumnIndex::Optional(optional_index) => {
                 u32::from(optional_index.contains(row_addr.row_id))
             }

@@ -42,11 +42,9 @@ struct RemappedTermOrdinalsValues<'a> {
 impl Iterable for RemappedTermOrdinalsValues<'_> {
     fn boxed_iter(&self) -> Box<dyn Iterator<Item = u64> + '_> {
         match self.merge_row_order {
-            MergeRowOrder::Stack(_) => self.boxed_iter_stacked(),
             MergeRowOrder::Shuffled(shuffle_merge_order) => {
                 self.boxed_iter_shuffled(shuffle_merge_order)
             }
-            MergeRowOrder::Disjoint => unimplemented!(),
         }
     }
 }
@@ -142,18 +140,6 @@ fn serialize_merged_dict(
     let mut sstable_builder = sstable::VoidSSTable::writer(output);
 
     match merge_row_order {
-        MergeRowOrder::Stack(_) => {
-            let mut current_term_ord = 0;
-            while merged_terms.advance() {
-                let term_bytes: &[u8] = merged_terms.key();
-                sstable_builder.insert(term_bytes, &())?;
-                for (segment_ord, from_term_ord) in merged_terms.matching_segments() {
-                    term_ord_mapping.register_from_to(segment_ord, from_term_ord, current_term_ord);
-                }
-                current_term_ord += 1;
-            }
-            sstable_builder.finish()?;
-        }
         MergeRowOrder::Shuffled(shuffle_merge_order) => {
             assert_eq!(shuffle_merge_order.alive_bitsets.len(), bytes_columns.len());
             let mut term_bitsets: Vec<Option<BitSet>> = Vec::with_capacity(bytes_columns.len());
@@ -186,7 +172,6 @@ fn serialize_merged_dict(
             }
             sstable_builder.finish()?;
         }
-        MergeRowOrder::Disjoint => unimplemented!(),
     }
     Ok(term_ord_mapping)
 }

@@ -97,7 +97,7 @@ impl FieldNormReader {
     }
 
     /// Returns the number of documents in this segment.
-    pub fn num_docs(&self) -> u32 {
+    pub fn max_doc_id_plus_one(&self) -> u32 {
         match &self.0 {
             ReaderImplEnum::FromData(data) => data.len() as u32,
             ReaderImplEnum::Const { num_docs, .. } => *num_docs,
@@ -168,7 +168,7 @@ mod tests {
     fn test_from_fieldnorms_array() {
         let fieldnorms = &[1, 2, 3, 4, 1_000_000];
         let fieldnorm_reader = FieldNormReader::for_test(fieldnorms);
-        assert_eq!(fieldnorm_reader.num_docs(), 5);
+        assert_eq!(fieldnorm_reader.max_doc_id_plus_one(), 5);
         assert_eq!(fieldnorm_reader.fieldnorm(0), 1);
         assert_eq!(fieldnorm_reader.fieldnorm(1), 2);
         assert_eq!(fieldnorm_reader.fieldnorm(2), 3);
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn test_const_fieldnorm_reader_small_fieldnorm_id() {
         let fieldnorm_reader = FieldNormReader::constant(1_000_000u32, 10u32);
-        assert_eq!(fieldnorm_reader.num_docs(), 1_000_000u32);
+        assert_eq!(fieldnorm_reader.max_doc_id_plus_one(), 1_000_000u32);
         assert_eq!(fieldnorm_reader.fieldnorm(0u32), 10u32);
         assert_eq!(fieldnorm_reader.fieldnorm_id(0u32), 10u8);
     }
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn test_const_fieldnorm_reader_large_fieldnorm_id() {
         let fieldnorm_reader = FieldNormReader::constant(1_000_000u32, 300u32);
-        assert_eq!(fieldnorm_reader.num_docs(), 1_000_000u32);
+        assert_eq!(fieldnorm_reader.max_doc_id_plus_one(), 1_000_000u32);
         assert_eq!(fieldnorm_reader.fieldnorm(0u32), 280u32);
         assert_eq!(fieldnorm_reader.fieldnorm_id(0u32), 72u8);
     }

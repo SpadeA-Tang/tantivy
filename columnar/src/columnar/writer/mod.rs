@@ -567,14 +567,6 @@ fn send_to_serialize_column_mappable_to_u128<
     values.clear();
     // TODO: split index and values
     let serializable_column_index = match cardinality {
-        Cardinality::Full => {
-            consume_operation_iterator(
-                op_iterator,
-                value_index_builders.borrow_required_index_builder(),
-                values,
-            );
-            SerializableColumnIndex::Full
-        }
         Cardinality::Optional => {
             let optional_index_builder = value_index_builders.borrow_optional_index_builder();
             consume_operation_iterator(op_iterator, optional_index_builder, values);
@@ -610,15 +602,6 @@ fn send_to_serialize_column_mappable_to_u64(
 ) -> io::Result<()> {
     values.clear();
     let serializable_column_index = match cardinality {
-        Cardinality::Full => {
-            unimplemented!()
-            // consume_operation_iterator(
-            //     op_iterator,
-            //     value_index_builders.borrow_required_index_builder(),
-            //     values,
-            // );
-            // SerializableColumnIndex::Full
-        }
         Cardinality::Optional => {
             let optional_index_builder = value_index_builders.borrow_optional_index_builder();
             consume_operation_iterator(op_iterator, optional_index_builder, values);

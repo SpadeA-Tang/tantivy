@@ -19,20 +19,11 @@ fn detect_cardinality_single_column_index(
         return column_index.get_cardinality();
     };
     let cardinality_before_deletes = column_index.get_cardinality();
-    if cardinality_before_deletes == Cardinality::Full {
-        // The columnar cardinality can only become more restrictive in the presence of deletes
-        // (where cardinality sorted from the more restrictive to the least restrictive are Full,
-        // Optional, Multivalued)
-        //
-        // If we are already "Full", we are guaranteed to stay "Full" after deletes.
-        return Cardinality::Full;
-    }
-    let mut cardinality_so_far = Cardinality::Full;
+    let mut cardinality_so_far = Cardinality::Optional;
     for doc_id in alive_bitset.iter() {
         let num_values = column_index.value_row_ids(doc_id).len();
         let row_cardinality = match num_values {
             0 => Cardinality::Optional,
-            1 => Cardinality::Full,
             _ => Cardinality::Multivalued,
         };
         cardinality_so_far = cardinality_so_far.max(row_cardinality);
@@ -50,13 +41,8 @@ fn detect_cardinality(
     merge_row_order: &MergeRowOrder,
 ) -> Cardinality {
     match merge_row_order {
-        MergeRowOrder::Stack(_) => column_indexes
-            .iter()
-            .map(ColumnIndex::get_cardinality)
-            .max()
-            .unwrap_or(Cardinality::Full),
         MergeRowOrder::Shuffled(shuffle_merge_order) => {
-            let mut merged_cardinality = Cardinality::Full;
+            let mut merged_cardinality = Cardinality::Optional;
             for (column_index, alive_bitset_opt) in column_indexes
                 .iter()
                 .zip(shuffle_merge_order.alive_bitsets.iter())
@@ -70,7 +56,6 @@ fn detect_cardinality(
             }
             merged_cardinality
         }
-        MergeRowOrder::Disjoint => Cardinality::Optional,
     }
 }
 
@@ -82,13 +67,9 @@ pub fn merge_column_index<'a>(
     // downgraded thanks to deletes.
     let cardinality_after_merge = detect_cardinality(columns, merge_row_order);
     match merge_row_order {
-        MergeRowOrder::Stack(stack_merge_order) => {
-            merge_column_index_stacked(columns, cardinality_after_merge, stack_merge_order)
-        }
         MergeRowOrder::Shuffled(complex_merge_order) => {
             merge_column_index_shuffled(columns, cardinality_after_merge, complex_merge_order)
         }
-        MergeRowOrder::Disjoint => merge_column_index_disjoint(columns, cardinality_after_merge),
     }
 }
 

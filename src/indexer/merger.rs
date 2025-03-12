@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use columnar::{
@@ -110,25 +111,20 @@ fn convert_to_merge_order(
     columnars: &[&ColumnarReader],
     doc_id_mapping: SegmentDocIdMapping,
 ) -> MergeRowOrder {
-    match doc_id_mapping.mapping_type() {
-        MappingType::Stacked => MergeRowOrder::Stack(StackMergeOrder::stack(columnars)),
-        MappingType::StackedWithDeletes => {
-            // RUST/LLVM is amazing. The following conversion is actually a no-op:
-            // no allocation, no copy.
-            let new_row_id_to_old_row_id: Vec<RowAddr> = doc_id_mapping
-                .new_doc_id_to_old_doc_addr
-                .into_iter()
-                .map(|doc_addr| RowAddr {
-                    segment_ord: doc_addr.segment_ord,
-                    row_id: doc_addr.doc_id,
-                })
-                .collect();
-            MergeRowOrder::Shuffled(ShuffleMergeOrder {
-                new_row_id_to_old_row_id,
-                alive_bitsets: doc_id_mapping.alive_bitsets,
-            })
-        }
-    }
+    // RUST/LLVM is amazing. The following conversion is actually a no-op:
+    // no allocation, no copy.
+    let new_row_id_to_old_row_id: Vec<RowAddr> = doc_id_mapping
+        .new_doc_id_to_old_doc_addr
+        .into_iter()
+        .map(|doc_addr| RowAddr {
+            segment_ord: doc_addr.segment_ord,
+            row_id: doc_addr.doc_id,
+        })
+        .collect();
+    MergeRowOrder::Shuffled(ShuffleMergeOrder {
+        new_row_id_to_old_row_id,
+        alive_bitsets: doc_id_mapping.alive_bitsets,
+    })
 }
 
 fn extract_fast_field_required_columns(schema: &Schema) -> Vec<(String, ColumnType)> {
@@ -201,15 +197,26 @@ impl IndexMerger {
         let mut fieldnorms_data = Vec::with_capacity(self.max_doc as usize);
         for field in fields {
             fieldnorms_data.clear();
-            let fieldnorms_readers: Vec<FieldNormReader> = self
+            let fieldnorms_readers: HashSet<FieldNormReader> = self
                 .readers
                 .iter()
                 .map(|reader| reader.get_fieldnorms_reader(field))
                 .collect::<Result<_, _>>()?;
-            for old_doc_addr in doc_id_mapping.iter_old_doc_addrs() {
-                let fieldnorms_reader = &fieldnorms_readers[old_doc_addr.segment_ord as usize];
-                let fieldnorm_id = fieldnorms_reader.fieldnorm_id(old_doc_addr.doc_id);
-                fieldnorms_data.push(fieldnorm_id);
+            let max_doc_plus_one = fieldnorms_readers
+                .iter()
+                .map(|reader| reader.max_doc_id_plus_one())
+                .max();
+            let fieldnorms_data = Vec::with_capacity(max_doc_plus_one);
+            let mut fieldnorm_done = HashSet::new();
+            for i in 0..max_doc_plus_one {
+                let mut fieldnorm_id = 0;
+                for reader in fieldnorms_readers {
+                    if i >= reader.max_doc_id_plus_one() {
+                        fieldnorm_done.push(reader);
+                    } else {
+                        
+                    }
+                }
             }
             fieldnorms_serializer.serialize_field(field, &fieldnorms_data[..])?;
         }
@@ -543,9 +550,10 @@ impl IndexMerger {
         }
         let doc_id_mapping = self.get_doc_id_from_concatenated_data()?;
         debug!("write-fieldnorms");
-        // if let Some(fieldnorms_serializer) = serializer.extract_fieldnorms_serializer() {
-        //     self.write_fieldnorms(fieldnorms_serializer, &doc_id_mapping)?;
-        // }
+        if let Some(fieldnorms_serializer) = serializer.extract_fieldnorms_serializer() {
+            self.write_fieldnorms(fieldnorms_serializer, &doc_id_mapping)?;
+        }
+
         debug!("write-postings");
         let fieldnorm_data = serializer
             .segment()

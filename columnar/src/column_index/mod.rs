@@ -25,7 +25,6 @@ pub enum ColumnIndex {
     Empty {
         num_docs: u32,
     },
-    Full,
     Optional(OptionalIndex),
     /// In addition, at index num_rows, an extra value is added
     /// containing the overall number of values.
@@ -52,7 +51,6 @@ impl ColumnIndex {
     #[inline]
     pub fn get_cardinality(&self) -> Cardinality {
         match self {
-            ColumnIndex::Empty { num_docs: 0 } | ColumnIndex::Full => Cardinality::Full,
             ColumnIndex::Empty { .. } => Cardinality::Optional,
             ColumnIndex::Optional(_) => Cardinality::Optional,
             ColumnIndex::Multivalued(_) => Cardinality::Multivalued,
@@ -63,7 +61,6 @@ impl ColumnIndex {
     pub fn has_value(&self, doc_id: DocId) -> bool {
         match self {
             ColumnIndex::Empty { .. } => false,
-            ColumnIndex::Full => true,
             ColumnIndex::Optional(optional_index) => optional_index.contains(doc_id),
             ColumnIndex::Multivalued(multivalued_index) => {
                 !multivalued_index.range(doc_id).is_empty()
@@ -74,7 +71,6 @@ impl ColumnIndex {
     pub fn value_row_ids(&self, doc_id: DocId) -> Range<RowId> {
         match self {
             ColumnIndex::Empty { .. } => 0..0,
-            ColumnIndex::Full => doc_id..doc_id + 1,
             ColumnIndex::Optional(optional_index) => {
                 if let Some(val) = optional_index.rank_if_exists(doc_id) {
                     val..val + 1
@@ -102,10 +98,6 @@ impl ColumnIndex {
     ) {
         match self {
             ColumnIndex::Empty { .. } => {}
-            ColumnIndex::Full => {
-                doc_ids_out.extend_from_slice(doc_ids);
-                row_ids.extend_from_slice(doc_ids);
-            }
             ColumnIndex::Optional(optional_index) => {
                 for doc_id in doc_ids {
                     if let Some(row_id) = optional_index.rank_if_exists(*doc_id) {
@@ -128,7 +120,6 @@ impl ColumnIndex {
     pub fn docid_range_to_rowids(&self, doc_id_range: Range<DocId>) -> Range<RowId> {
         match self {
             ColumnIndex::Empty { .. } => 0..0,
-            ColumnIndex::Full => doc_id_range,
             ColumnIndex::Optional(optional_index) => {
                 let row_start = optional_index.rank(doc_id_range.start);
                 let row_end = optional_index.rank(doc_id_range.end);
@@ -176,10 +167,6 @@ impl ColumnIndex {
         match self {
             ColumnIndex::Empty { .. } => {
                 rank_ids.clear();
-            }
-            ColumnIndex::Full => {
-                // No need to do anything:
-                // value_idx and row_idx are the same.
             }
             ColumnIndex::Optional(optional_index) => {
                 optional_index.select_batch(&mut rank_ids[..]);

@@ -26,7 +26,6 @@ impl<'a> From<&'a OptionalIndex> for SerializableOptionalIndex<'a> {
 }
 
 pub enum SerializableColumnIndex<'a> {
-    Full,
     Optional(SerializableOptionalIndex<'a>),
     Multivalued(SerializableMultivalueIndex<'a>),
 }
@@ -34,7 +33,6 @@ pub enum SerializableColumnIndex<'a> {
 impl SerializableColumnIndex<'_> {
     pub fn get_cardinality(&self) -> Cardinality {
         match self {
-            SerializableColumnIndex::Full => Cardinality::Full,
             SerializableColumnIndex::Optional(_) => Cardinality::Optional,
             SerializableColumnIndex::Multivalued(_) => Cardinality::Multivalued,
         }
@@ -50,9 +48,6 @@ pub fn serialize_column_index(
     let cardinality = column_index.get_cardinality().to_code();
     output.write_all(&[cardinality])?;
     match column_index {
-        SerializableColumnIndex::Full => {
-            unimplemented!()
-        }
         SerializableColumnIndex::Optional(SerializableOptionalIndex {
             non_null_row_ids,
             num_rows,
@@ -81,7 +76,6 @@ pub fn open_column_index(
     let cardinality = Cardinality::try_from_code(cardinality_code)?;
     bytes.advance(1);
     match cardinality {
-        Cardinality::Full => Ok(ColumnIndex::Full),
         Cardinality::Optional => {
             let optional_index = super::optional_index::open_optional_index(bytes)?;
             Ok(ColumnIndex::Optional(optional_index))
