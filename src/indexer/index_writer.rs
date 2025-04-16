@@ -962,7 +962,7 @@ impl<D: Document> IndexWriter<D> {
 
     fn send_add_documents_batch(&self, add_ops: AddBatch<D>) -> crate::Result<()> {
         if self.index_writer_status.is_alive() {
-            let sender: Arc<async_channel::Sender<SmallVec<[AddOperation<D>; 4]>>> =
+            let sender: Arc<async_channel::Sender<SmallVec<[AddOperation<D>; 64]>>> =
                 Arc::clone(&self.operation_sender);
             if get_tokio_indexing_worker_pool()
                 .block_on(async move { sender.send(add_ops).await.is_ok() })
