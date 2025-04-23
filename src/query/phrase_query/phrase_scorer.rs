@@ -451,15 +451,6 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
             .docset_mut_specialized(0)
             .positions(&mut self.left_positions);
 
-        if self.num_terms == 2 {
-            // we actually just prepare positions when there are only two terms in this method
-            self.intersection_docset
-                .docset_mut_specialized(1)
-                .positions(&mut self.right_positions);
-
-            return;
-        }
-
         if self.has_slop() {
             // If having slop, we should keep the position span info to consider all possible
             // situations
@@ -470,6 +461,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
                     left: pos,
                     right: pos,
                 }));
+
             for i in 1..self.num_terms - 1 {
                 self.intersection_docset
                     .docset_mut_specialized(i)
