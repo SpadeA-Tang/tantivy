@@ -18,7 +18,6 @@ pub struct FileWatcher {
     path: Arc<Path>,
     callbacks: Arc<WatchCallbackList>,
     state: Arc<AtomicUsize>, // 0: new, 1: runnable, 2: terminated
-    watch_handle: RwLock<Option<JoinHandle<()>>>,
     wakeup_channel: RwLock<Option<async_channel::Sender<()>>>,
 }
 
@@ -28,7 +27,6 @@ impl FileWatcher {
             path: Arc::from(path),
             callbacks: Default::default(),
             state: Default::default(),
-            watch_handle: RwLock::new(None),
             wakeup_channel: RwLock::new(None),
         }
     }
@@ -72,8 +70,7 @@ impl FileWatcher {
                 }
             }
         };
-        let watch_handle = TOKIO_FILE_WATCHER_WORKER_RUNTIME.spawn(task);
-        self.watch_handle.write().unwrap().replace(watch_handle);
+        let _ = TOKIO_FILE_WATCHER_WORKER_RUNTIME.spawn(task);
     }
 
     pub fn watch(&self, callback: WatchCallback) -> WatchHandle {
@@ -102,11 +99,8 @@ impl FileWatcher {
 
     pub fn graceful_stop(&self) {
         self.state.store(2, Ordering::SeqCst);
-        if let Some(handle) = self.watch_handle.write().unwrap().take() {
-            let _ = self.wakeup_channel.write().unwrap().take();
-            handle.abort();
-            info!("Meta file watcher thread joined/aborted");
-        }
+        let _ = self.wakeup_channel.write().unwrap().take();
+        info!("Meta file watcher thread joined/aborted");
     }
 }
 
