@@ -105,6 +105,7 @@ impl FileWatcher {
         if let Some(handle) = self.watch_handle.write().unwrap().take() {
             let _ = self.wakeup_channel.write().unwrap().take();
             handle.abort();
+            get_tokio_file_watcher_worker_pool().block_on(handle);
             info!("Meta file watcher thread joined/aborted");
         }
     }
