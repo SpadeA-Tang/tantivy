@@ -59,6 +59,7 @@ fn remap_doc_opstamps(
 /// They creates the postings list in anonymous memory.
 /// The segment is laid on disk when the segment gets `finalized`.
 pub struct SegmentWriter {
+    pub(crate) num_docs: DocId,
     pub(crate) max_doc: DocId,
     pub(crate) ctx: IndexingContext,
     pub(crate) per_field_postings_writers: PerFieldPostingsWriter,
@@ -114,6 +115,7 @@ impl SegmentWriter {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(SegmentWriter {
+            num_docs: 0,
             max_doc: 0,
             ctx: IndexingContext::new(table_size),
             per_field_postings_writers,
@@ -165,8 +167,7 @@ impl SegmentWriter {
             + self.segment_serializer.mem_usage()
     }
 
-    fn index_document(&mut self, doc: &Document) -> crate::Result<()> {
-        let doc_id = self.max_doc;
+    fn index_document(&mut self, doc_id: u32, doc: &Document) -> crate::Result<()> {
         let vals_grouped_by_field = doc
             .field_values()
             .iter()
@@ -344,17 +345,55 @@ impl SegmentWriter {
         Ok(())
     }
 
+    pub async fn add_document(&mut self, add_operation: AddOperation) -> crate::Result<()> {
+        if self.segment_serializer.segment().user_specified_doc_id() {
+            self.add_document_with_specified_id(add_operation).await
+        } else {
+            self.add_document_with_default_id(add_operation).await
+        }
+    }
+
     /// Indexes a new document
     ///
     /// As a user, you should rather use `IndexWriter`'s add_document.
-    pub async fn add_document(&mut self, add_operation: AddOperation) -> crate::Result<()> {
-        let AddOperation { document, opstamp } = add_operation;
+    async fn add_document_with_default_id(
+        &mut self,
+        add_operation: AddOperation,
+    ) -> crate::Result<()> {
+        let AddOperation {
+            document,
+            opstamp,
+            doc_id,
+        } = add_operation;
+        assert!(doc_id.is_none());
         self.doc_opstamps.push(opstamp);
         self.fast_field_writers.add_document(&document)?;
-        self.index_document(&document)?;
+
+        let doc_id = self.max_doc;
+        self.index_document(doc_id, &document)?;
         let doc_writer = self.segment_serializer.get_store_writer();
         doc_writer.store(&document, &self.schema).await?;
+        self.num_docs += 1;
         self.max_doc += 1;
+        Ok(())
+    }
+
+    /// Indexes a new document with a given doc_id
+    ///
+    /// In this case, we must not have field with fast field as well as stored.
+    async fn add_document_with_specified_id(
+        &mut self,
+        add_operation: AddOperation,
+    ) -> crate::Result<()> {
+        let AddOperation {
+            document,
+            opstamp,
+            doc_id,
+        } = add_operation;
+        self.doc_opstamps.push(opstamp);
+        self.index_document(doc_id.unwrap(), &document)?;
+        self.num_docs += 1;
+        self.max_doc = std::cmp::max(self.max_doc, doc_id.unwrap() + 1);
         Ok(())
     }
 
@@ -364,17 +403,9 @@ impl SegmentWriter {
     ///
     /// Currently, **tantivy** does not handle deletes anyway,
     /// so `max_doc == num_docs`
+    // **Note**: If user specified doc id is used, max_doc no longer equals to
+    // num_docs.
     pub fn max_doc(&self) -> u32 {
-        self.max_doc
-    }
-
-    /// Number of documents in the index.
-    /// Deleted documents are not counted.
-    ///
-    /// Currently, **tantivy** does not handle deletes anyway,
-    /// so `max_doc == num_docs`
-    #[allow(dead_code)]
-    pub fn num_docs(&self) -> u32 {
         self.max_doc
     }
 }

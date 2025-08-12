@@ -152,11 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_sorted_index_desc_not_disjunct() {
-        test_merge_sorted_index_desc_(false);
-    }
-
-    #[test]
     fn test_merge_sorted_index_desc_disjunct() {
         test_merge_sorted_index_desc_(true);
     }

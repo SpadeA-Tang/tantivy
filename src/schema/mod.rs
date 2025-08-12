@@ -152,7 +152,7 @@ pub use self::numeric_options::IntOptions;
 pub use self::numeric_options::NumericOptions;
 pub use self::schema::{DocParsingError, Schema, SchemaBuilder};
 pub use self::term::{Term, ValueBytes, JSON_END_OF_PATH};
-pub use self::text_options::{TextFieldIndexing, TextOptions, STRING, TEXT};
+pub use self::text_options::{TextFieldIndexing, TextOptions, STRING, TEXT, TEXT_WITH_DOC_ID};
 pub use self::value::Value;
 
 /// Validator for a potential `field_name`.

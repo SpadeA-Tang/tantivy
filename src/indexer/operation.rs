@@ -13,6 +13,7 @@ pub struct DeleteOperation {
 pub struct AddOperation {
     pub opstamp: Opstamp,
     pub document: Document,
+    pub doc_id: Option<u32>,
 }
 
 /// UserOperation is an enum type that encapsulates other operation types.

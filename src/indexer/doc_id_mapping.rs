@@ -20,6 +20,7 @@ pub(crate) struct SegmentDocIdMapping {
     pub(crate) new_doc_id_to_old_doc_addr: Vec<DocAddress>,
     pub(crate) alive_bitsets: Vec<Option<ReadOnlyBitSet>>,
     mapping_type: MappingType,
+    has_deletes: bool,
 }
 
 impl SegmentDocIdMapping {
@@ -27,11 +28,13 @@ impl SegmentDocIdMapping {
         new_doc_id_to_old_doc_addr: Vec<DocAddress>,
         mapping_type: MappingType,
         alive_bitsets: Vec<Option<ReadOnlyBitSet>>,
+        has_deletes: bool,
     ) -> Self {
         Self {
             new_doc_id_to_old_doc_addr,
             mapping_type,
             alive_bitsets,
+            has_deletes,
         }
     }
 
@@ -61,6 +64,10 @@ impl SegmentDocIdMapping {
             MappingType::Stacked | MappingType::StackedWithDeletes => true,
             MappingType::Shuffled => false,
         }
+    }
+
+    pub fn has_deletes(&self) -> bool {
+        self.has_deletes
     }
 }
 
