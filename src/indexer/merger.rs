@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
@@ -309,11 +310,11 @@ fn serialize_merged_terms_for_user_id(
         // to filter docs that are deleted.
         let segment_doc_id_mapper = doc_id_mapper.segment_doc_id_mapper(segment_ord);
         if let Some(posting_entry) = PostingEntry::new(segment_doc_id_mapper, postings) {
-            heap.push(posting_entry);
+            heap.push(Reverse(posting_entry));
         }
     }
 
-    while let Some(mut next) = heap.pop() {
+    while let Some(Reverse(mut next)) = heap.pop() {
         let doc_id = next.cur_doc;
 
         next.postings.positions(positions_buffer);
@@ -323,7 +324,7 @@ fn serialize_merged_terms_for_user_id(
         field_serializer.write_doc(doc_id, term_freq, delta_positions);
 
         if next.advance() != TERMINATED {
-            heap.push(next);
+            heap.push(Reverse(next));
         }
     }
 
@@ -408,10 +409,20 @@ impl IndexMerger {
             }
         }
 
-        let max_doc = readers.iter().map(|reader| reader.num_docs()).sum();
         if let Some(sort_by_field) = index_settings.sort_by_field.as_ref() {
             readers = Self::sort_readers_by_min_sort_field(readers, sort_by_field)?;
         }
+
+        let max_doc = if schema.user_specified_doc_id() {
+            readers
+                .iter()
+                .map(|reader| reader.max_doc())
+                .max()
+                .unwrap_or_default()
+        } else {
+            readers.iter().map(|reader| reader.num_docs()).sum()
+        };
+
         // sort segments by their natural sort setting
         if max_doc >= MAX_DOC_LIMIT {
             let err_msg = format!(
@@ -1938,5 +1949,58 @@ mod tests {
         }
 
         assert_eq!(vec.len(), 666);
+    }
+
+    #[test]
+    fn test_merge_with_user_specified_doc_id_term_across_segments() {
+        let mut builder = schema::SchemaBuilder::new();
+        let text = builder.add_text_field("text", TEXT_WITH_DOC_ID);
+        builder.enable_user_specified_doc_id();
+        let index = Index::create_in_ram(builder.build());
+        let mut writer = index
+            .writer_with_num_threads(4, 4 * MEMORY_BUDGET_NUM_BYTES_MIN)
+            .unwrap();
+
+        for i in 0..1000 {
+            let _ = writer
+                .add_document_with_doc_id(
+                    i,
+                    doc!(
+                        text => "hello",
+                    ),
+                )
+                .unwrap();
+
+            if i % 100 == 0 {
+                writer.commit().unwrap();
+            }
+        }
+
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let term = Term::from_field_text(text, "hello");
+        let term_query = TermQuery::new(term, IndexRecordOption::Basic);
+        let doc_set = searcher.search(&term_query, &DocSetCollector).unwrap();
+        assert_eq!(doc_set.len(), 1000);
+
+        let segment_ids: Vec<SegmentId> = searcher
+            .segment_readers()
+            .iter()
+            .map(|reader| reader.segment_id())
+            .collect();
+        if let Err(e) = writer.merge(&segment_ids[..]).wait() {
+            assert!(e.to_string().contains(
+                "This is not necessarily a bug, and can happen after a rollback for instance."
+            ));
+        }
+
+        reader.reload().unwrap();
+        let searcher = reader.searcher();
+        let term = Term::from_field_text(text, "hello");
+        let term_query = TermQuery::new(term, IndexRecordOption::Basic);
+        let doc_set = searcher.search(&term_query, &DocSetCollector).unwrap();
+        assert_eq!(doc_set.len(), 1000);
     }
 }
