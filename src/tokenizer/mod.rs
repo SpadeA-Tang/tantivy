@@ -127,6 +127,7 @@ mod empty_tokenizer;
 mod facet_tokenizer;
 mod lower_caser;
 mod ngram_tokenizer;
+mod ngram_tokenizer_with_chars;
 mod raw_tokenizer;
 mod regex_tokenizer;
 mod remove_long;
@@ -146,6 +147,9 @@ pub use self::ascii_folding_filter::AsciiFoldingFilter;
 pub use self::facet_tokenizer::FacetTokenizer;
 pub use self::lower_caser::LowerCaser;
 pub use self::ngram_tokenizer::NgramTokenizer;
+pub use self::ngram_tokenizer_with_chars::{
+    NgramTokenizerWithChars, TokenCharType, TokenCharsConfig,
+};
 pub use self::raw_tokenizer::RawTokenizer;
 pub use self::regex_tokenizer::RegexTokenizer;
 pub use self::remove_long::RemoveLongFilter;

@@ -48,6 +48,7 @@ rustc-hash = "2.0.0"
 thiserror = "2.0.1"
 htmlescape = "0.3.1"
 fail = { version = "0.5.0", optional = true }
+unicode_categories = "0.1.1"
 time = { version = "0.3.35", features = ["serde-well-known"] }
 smallvec = "1.8.0"
 rayon = "1.5.2"
