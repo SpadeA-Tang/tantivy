@@ -86,6 +86,19 @@ impl TokenCharsConfig {
         self
     }
 
+    pub fn with_all() -> Self {
+        let mut token_chars = HashSet::new();
+        token_chars.insert(TokenCharType::Letter);
+        token_chars.insert(TokenCharType::Digit);
+        token_chars.insert(TokenCharType::Whitespace);
+        token_chars.insert(TokenCharType::Punctuation);
+        token_chars.insert(TokenCharType::Symbol);
+        Self {
+            token_chars,
+            custom_token_chars: String::new(),
+        }
+    }
+
     /// Check if a character should be kept based on configuration
     pub fn should_keep_char(&self, ch: char) -> bool {
         // Check custom characters first
@@ -337,6 +350,15 @@ mod tests {
     use super::*;
     use crate::tokenizer::{Token, TokenStream, Tokenizer};
 
+    fn create_alphanumeric_tokenizer(
+        min_gram: usize,
+        max_gram: usize,
+        prefix_only: bool,
+    ) -> NgramTokenizerWithChars {
+        let config = TokenCharsConfig::default().with_letters().with_digits();
+        NgramTokenizerWithChars::new(min_gram, max_gram, prefix_only, config).unwrap()
+    }
+
     fn collect_tokens<T: TokenStream>(mut stream: T) -> Vec<Token> {
         let mut tokens = Vec::new();
         while stream.advance() {
@@ -347,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_token_chars_config() {
-        let config = TokenCharsConfig::default();
+        let config = TokenCharsConfig::with_all();
         assert!(config.should_keep_char('a'));
         assert!(config.should_keep_char('1'));
         assert!(config.should_keep_char(' '));
@@ -388,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_alphanumeric_tokenizer() {
-        let mut tokenizer = NgramTokenizerWithChars::alphanumeric(2, 3, false).unwrap();
+        let mut tokenizer = create_alphanumeric_tokenizer(2, 3, false);
         let tokens = collect_tokens(tokenizer.token_stream("hello-world123"));
 
         // Should split at hyphen and process "hello", "world123" separately
@@ -427,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_offset_preservation() {
-        let mut tokenizer = NgramTokenizerWithChars::alphanumeric(2, 2, false).unwrap();
+        let mut tokenizer = create_alphanumeric_tokenizer(2, 2, false);
         let tokens = collect_tokens(tokenizer.token_stream("ab cd"));
 
         // Check offsets are preserved correctly
@@ -442,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_unicode_handling() {
-        let mut tokenizer = NgramTokenizerWithChars::alphanumeric(2, 3, false).unwrap();
+        let mut tokenizer = create_alphanumeric_tokenizer(2, 3, false);
         let tokens = collect_tokens(tokenizer.token_stream("café-2024"));
 
         // Should handle unicode correctly
@@ -559,7 +581,7 @@ mod tests {
     #[test]
     fn test_prefix_only_mode() {
         // Test prefix_only mode for autocomplete use case
-        let config = TokenCharsConfig::default();
+        let config = TokenCharsConfig::with_all();
         let mut tokenizer = NgramTokenizerWithChars::new(2, 5, true, config).unwrap();
         let tokens = collect_tokens(tokenizer.token_stream("search"));
 
@@ -578,7 +600,7 @@ mod tests {
     #[test]
     fn test_empty_input() {
         // Test empty string handling
-        let mut tokenizer = NgramTokenizerWithChars::alphanumeric(2, 3, false).unwrap();
+        let mut tokenizer = create_alphanumeric_tokenizer(2, 3, false);
         let tokens = collect_tokens(tokenizer.token_stream(""));
         assert!(tokens.is_empty());
     }
@@ -586,7 +608,7 @@ mod tests {
     #[test]
     fn test_single_char_below_min_gram() {
         // Test input shorter than min_gram
-        let mut tokenizer = NgramTokenizerWithChars::alphanumeric(2, 3, false).unwrap();
+        let mut tokenizer = create_alphanumeric_tokenizer(2, 3, false);
 
         // Single character - should produce no tokens
         let tokens = collect_tokens(tokenizer.token_stream("a"));
@@ -633,7 +655,7 @@ mod tests {
     #[test]
     fn test_position_field() {
         // Test that position field is set correctly for segments
-        let mut tokenizer = NgramTokenizerWithChars::alphanumeric(2, 2, false).unwrap();
+        let mut tokenizer = create_alphanumeric_tokenizer(2, 2, false);
         let tokens = collect_tokens(tokenizer.token_stream("ab-cd-ef"));
 
         // Each segment should have incrementing position
@@ -681,7 +703,7 @@ mod tests {
     fn test_large_text() {
         // Test performance with large text
         let large_text = "a".repeat(1000);
-        let mut tokenizer = NgramTokenizerWithChars::alphanumeric(2, 3, false).unwrap();
+        let mut tokenizer = create_alphanumeric_tokenizer(2, 3, false);
         let tokens = collect_tokens(tokenizer.token_stream(&large_text));
 
         // Should generate correct number of ngrams

@@ -36,6 +36,7 @@
 //!
 //! ## A basic custom document
 //! ```
+//! # #![allow(dead_code)]
 //! use std::collections::{btree_map, BTreeMap};
 //! use tantivy::schema::{Document, Field};
 //! use tantivy::schema::document::{DeserializeError, DocumentDeserialize, DocumentDeserializer};
